@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { User } from '@supabase/supabase-js';
 import {
   continueAsGuest,
@@ -26,8 +26,36 @@ interface AuthModalProps {
   onSignOut: () => Promise<void>;
 }
 
-type AuthChannel = 'email' | 'phone';
-type EmailMethod = 'password' | 'otp';
+type AuthTab = 'signup' | 'signin';
+type SignInMethod = 'password' | 'otp' | 'phone';
+
+interface CountryOption {
+  code: string;
+  name: string;
+  dial: string;
+  flag: string;
+  placeholder: string;
+}
+
+const COUNTRIES: CountryOption[] = [
+  { code: 'US', name: 'United States', dial: '+1', flag: '🇺🇸', placeholder: '(775) 351-6501' },
+  { code: 'IN', name: 'India', dial: '+91', flag: '🇮🇳', placeholder: '98765 43210' },
+  { code: 'GB', name: 'United Kingdom', dial: '+44', flag: '🇬🇧', placeholder: '7700 900077' },
+  { code: 'AE', name: 'United Arab Emirates', dial: '+971', flag: '🇦🇪', placeholder: '50 123 4567' },
+  { code: 'SA', name: 'Saudi Arabia', dial: '+966', flag: '🇸🇦', placeholder: '51 234 5678' },
+  { code: 'QA', name: 'Qatar', dial: '+974', flag: '🇶🇦', placeholder: '3312 3456' },
+  { code: 'OM', name: 'Oman', dial: '+968', flag: '🇴🇲', placeholder: '9212 3456' },
+  { code: 'KW', name: 'Kuwait', dial: '+965', flag: '🇰🇼', placeholder: '500 12345' },
+  { code: 'BH', name: 'Bahrain', dial: '+973', flag: '🇧🇭', placeholder: '3600 1234' },
+  { code: 'CA', name: 'Canada', dial: '+1', flag: '🇨🇦', placeholder: '(416) 555-0198' },
+  { code: 'AU', name: 'Australia', dial: '+61', flag: '🇦🇺', placeholder: '412 345 678' },
+  { code: 'DE', name: 'Germany', dial: '+49', flag: '🇩🇪', placeholder: '1512 3456789' },
+  { code: 'FR', name: 'France', dial: '+33', flag: '🇫🇷', placeholder: '6 12 34 56 78' },
+  { code: 'SG', name: 'Singapore', dial: '+65', flag: '🇸🇬', placeholder: '8123 4567' },
+  { code: 'MY', name: 'Malaysia', dial: '+60', flag: '🇲🇾', placeholder: '12-345 6789' },
+  { code: 'JP', name: 'Japan', dial: '+81', flag: '🇯🇵', placeholder: '90-1234-5678' },
+  { code: 'BR', name: 'Brazil', dial: '+55', flag: '🇧🇷', placeholder: '(11) 91234-5678' },
+];
 
 function getAuthErrorMessage(error: unknown, linkingGuest: boolean): string {
   const message =
@@ -43,7 +71,7 @@ function getAuthErrorMessage(error: unknown, linkingGuest: boolean): string {
 
 function GoogleMark() {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0">
       <path
         fill="#4285F4"
         d="M21.35 12.23c0-.72-.06-1.41-.18-2.08H12v3.94h5.24a4.48 4.48 0 0 1-1.95 2.94v2.45h3.16c1.85-1.7 2.9-4.2 2.9-7.25Z"
@@ -69,9 +97,45 @@ function GithubMark() {
     <svg
       aria-hidden="true"
       viewBox="0 0 24 24"
-      className="h-4 w-4 shrink-0 fill-current"
+      className="h-[19px] w-[19px] shrink-0 fill-white"
     >
       <path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.55.1.76-.24.76-.54v-2.1c-3.1.67-3.76-1.32-3.76-1.32-.5-1.28-1.24-1.62-1.24-1.62-1.01-.69.08-.68.08-.68 1.12.08 1.71 1.15 1.71 1.15 1 1.7 2.61 1.21 3.25.92.1-.72.39-1.21.71-1.49-2.48-.28-5.09-1.24-5.09-5.52 0-1.22.44-2.22 1.15-3-.12-.28-.5-1.42.11-2.96 0 0 .94-.3 3.05 1.15a10.6 10.6 0 0 1 5.55 0c2.12-1.45 3.05-1.15 3.05-1.15.61 1.54.23 2.68.12 2.96.71.78 1.14 1.78 1.14 3 0 4.3-2.61 5.23-5.1 5.51.4.35.76 1.03.76 2.08v3.07c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z" />
+    </svg>
+  );
+}
+
+function EnvelopeIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-[17px] w-[17px] shrink-0 text-[#6c6c74]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="2.5" />
+      <path d="m3.5 6.5 8.5 6 8.5-6" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-[17px] w-[17px] shrink-0 text-[#6c6c74]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2.5" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
     </svg>
   );
 }
@@ -83,28 +147,79 @@ export default function AuthModal({
   onSignOut,
 }: AuthModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const [channel, setChannel] = useState<AuthChannel>('email');
-  const [emailMethod, setEmailMethod] = useState<EmailMethod>('password');
-  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
+  const countryMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [activeTab, setActiveTab] = useState<AuthTab>('signup');
+  const [signInMethod, setSignInMethod] = useState<SignInMethod>('password');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
+  const [selectedCountry, setSelectedCountry] = useState<CountryOption>(
+    COUNTRIES[0],
+  );
+  const [countryDropdownOpen, setCountryDropdownOpen] = useState(false);
+  const [countryQuery, setCountryQuery] = useState('');
+  const [phoneLocal, setPhoneLocal] = useState('');
   const [password, setPassword] = useState('');
+  const [showSignUpPasswordStep, setShowSignUpPasswordStep] = useState(false);
   const [code, setCode] = useState('');
   const [codeSent, setCodeSent] = useState(false);
+  const [otpTargetChannel, setOtpTargetChannel] = useState<'email' | 'phone'>('email');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+
   const configured = isSupabaseConfigured();
+
+  const filteredCountries = useMemo(() => {
+    const q = countryQuery.trim().toLowerCase();
+    if (!q) return COUNTRIES;
+    return COUNTRIES.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.dial.includes(q) ||
+        c.code.toLowerCase().includes(q),
+    );
+  }, [countryQuery]);
+
+  const formattedE164Phone = useMemo(() => {
+    const raw = phoneLocal.trim();
+    if (!raw) return '';
+    if (raw.startsWith('+')) return raw.replace(/[^\d+]/g, '');
+    const digits = raw.replace(/\D/g, '');
+    if (!digits) return '';
+    return `${selectedCountry.dial}${digits}`;
+  }, [phoneLocal, selectedCountry]);
 
   useEffect(() => {
     if (!open) return;
     dialogRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busy) onClose();
+      if (event.key === 'Escape' && !busy) {
+        if (countryDropdownOpen) {
+          setCountryDropdownOpen(false);
+        } else {
+          onClose();
+        }
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, busy, onClose]);
+  }, [open, busy, countryDropdownOpen, onClose]);
+
+  useEffect(() => {
+    if (!countryDropdownOpen) return undefined;
+    const onPointerDown = (event: MouseEvent) => {
+      if (
+        countryMenuRef.current &&
+        !countryMenuRef.current.contains(event.target as Node)
+      ) {
+        setCountryDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [countryDropdownOpen]);
 
   useEffect(() => {
     if (open) return;
@@ -112,16 +227,21 @@ export default function AuthModal({
     setNotice('');
     setCode('');
     setCodeSent(false);
+    setShowSignUpPasswordStep(false);
+    setCountryDropdownOpen(false);
+    setCountryQuery('');
   }, [open]);
 
   if (!open) return null;
 
-  const switchChannel = (next: AuthChannel) => {
-    setChannel(next);
+  const switchTab = (next: AuthTab) => {
+    setActiveTab(next);
     setError('');
     setNotice('');
-    setCodeSent(false);
     setCode('');
+    setCodeSent(false);
+    setShowSignUpPasswordStep(false);
+    setCountryDropdownOpen(false);
   };
 
   const handleOAuth = async (provider: 'google' | 'github') => {
@@ -145,76 +265,135 @@ export default function AuthModal({
     }
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handleSendOtpFallback = async (channel: 'email' | 'phone') => {
     setBusy(true);
     setError('');
     setNotice('');
-
     try {
+      const isLinkingGuest = Boolean(user?.is_anonymous);
+      if (channel === 'phone') {
+        if (!formattedE164Phone) {
+          throw new Error('Please enter your phone number first.');
+        }
+        if (isLinkingGuest) await requestPhoneIdentityLink(formattedE164Phone);
+        else await requestPhoneOtp(formattedE164Phone);
+        setOtpTargetChannel('phone');
+        setCodeSent(true);
+        setNotice('A verification code has been sent to your phone.');
+      } else {
+        if (!email.trim()) {
+          throw new Error('Please enter your email address first.');
+        }
+        if (isLinkingGuest) await requestEmailIdentityLink(email.trim());
+        else await requestEmailOtp(email.trim());
+        setOtpTargetChannel('email');
+        setCodeSent(true);
+        setNotice('A one-time verification code has been sent to your email.');
+      }
+    } catch (err) {
+      setError(getAuthErrorMessage(err, Boolean(user?.is_anonymous)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+
+    // Step 1 of Sign Up: If user hasn't opened the password/verification step yet
+    if (activeTab === 'signup' && !codeSent && !showSignUpPasswordStep) {
+      if (!email.trim() && formattedE164Phone) {
+        // Phone-only sign up via SMS OTP
+        await handleSendOtpFallback('phone');
+        return;
+      }
+      if (!email.trim()) {
+        setError('Please enter your email address.');
+        return;
+      }
+      setShowSignUpPasswordStep(true);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const isLinkingGuest = Boolean(user?.is_anonymous);
+
       if (codeSent) {
-        const isLinkingGuest = Boolean(user?.is_anonymous);
         const result = isLinkingGuest
-          ? channel === 'email'
+          ? otpTargetChannel === 'email'
             ? await verifyEmailIdentityLink(email, code)
-            : await verifyPhoneIdentityLink(phone, code)
-          : channel === 'email'
+            : await verifyPhoneIdentityLink(formattedE164Phone, code)
+          : otpTargetChannel === 'email'
             ? await verifyEmailOtp(email, code)
-            : await verifyPhoneOtp(phone, code);
-        if (
-          isLinkingGuest &&
-          channel === 'email' &&
-          emailMethod === 'password'
-        ) {
+            : await verifyPhoneOtp(formattedE164Phone, code);
+
+        if (isLinkingGuest && otpTargetChannel === 'email' && password.length >= 8) {
           await setCurrentPassword(password);
         }
         if (result.session) onClose();
         return;
       }
 
-      if (channel === 'phone') {
-        if (user?.is_anonymous) await requestPhoneIdentityLink(phone);
-        else await requestPhoneOtp(phone);
-        setCodeSent(true);
-        setNotice(
-          user?.is_anonymous
-            ? 'A verification code is on its way. Enter it to link this phone to your guest session.'
-            : 'A one-time code is on its way to your phone.',
-        );
+      if (activeTab === 'signup') {
+        if (isLinkingGuest) {
+          await requestEmailIdentityLink(email);
+          setOtpTargetChannel('email');
+          setCodeSent(true);
+          setNotice(
+            'A verification code is on its way. Verify your email to link your account.',
+          );
+          return;
+        }
+
+        const result = await signUpWithPassword(email, password);
+        if (result.session) {
+          onClose();
+        } else {
+          setNotice(
+            'Check your inbox to confirm your email and finish creating your account.',
+          );
+        }
         return;
       }
 
-      if (emailMethod === 'otp') {
-        if (user?.is_anonymous) await requestEmailIdentityLink(email);
+      // Sign in tab
+      if (signInMethod === 'phone') {
+        if (!formattedE164Phone) {
+          throw new Error('Please enter your phone number.');
+        }
+        if (isLinkingGuest) await requestPhoneIdentityLink(formattedE164Phone);
+        else await requestPhoneOtp(formattedE164Phone);
+        setOtpTargetChannel('phone');
+        setCodeSent(true);
+        setNotice('A one-time code is on its way to your phone.');
+        return;
+      }
+
+      if (signInMethod === 'otp') {
+        if (isLinkingGuest) await requestEmailIdentityLink(email);
         else await requestEmailOtp(email);
+        setOtpTargetChannel('email');
         setCodeSent(true);
-        setNotice(
-          user?.is_anonymous
-            ? 'A verification code is on its way. Enter it to link this email to your guest session.'
-            : 'A one-time code is on its way to your inbox.',
-        );
+        setNotice('A one-time code is on its way to your inbox.');
         return;
       }
 
-      if (user?.is_anonymous) {
+      if (isLinkingGuest) {
         await requestEmailIdentityLink(email);
+        setOtpTargetChannel('email');
         setCodeSent(true);
         setNotice(
-          'A verification code is on its way. Verify your email to keep this guest session, then your password will be added.',
+          'A verification code is on its way. Verify your email to keep this session.',
         );
         return;
       }
 
-      const result = isCreatingAccount
-        ? await signUpWithPassword(email, password)
-        : await signInWithPassword(email, password);
-
+      const result = await signInWithPassword(email, password);
       if (result.session) {
         onClose();
-      } else if (isCreatingAccount) {
-        setNotice(
-          'Check your inbox to confirm your email and finish creating your account.',
-        );
       }
     } catch (err) {
       setError(getAuthErrorMessage(err, Boolean(user?.is_anonymous)));
@@ -257,43 +436,21 @@ export default function AuthModal({
     user?.phone ??
     (user?.is_anonymous ? 'Guest session' : 'Signed in');
 
-  /* ── Liquid Glass Tailwind Design Tokens ── */
-  const inputClasses =
-    'h-11 w-full rounded-xl border border-white/10 bg-white/[0.03] px-4 text-[13px] text-white placeholder:text-white/25 outline-none backdrop-blur-md transition-all duration-200 focus:border-white/25 focus:bg-white/[0.07] focus:shadow-[0_0_24px_rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50';
-
-  const oauthBtnClasses =
-    'group inline-flex h-11 w-full items-center justify-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.04] px-4 text-[12.5px] font-medium text-white/90 backdrop-blur-xl transition-all duration-200 hover:scale-[1.015] hover:border-white/20 hover:bg-white/[0.08] hover:text-white hover:shadow-[0_0_24px_rgba(255,255,255,0.07)] active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100 disabled:hover:shadow-none';
-
-  const primaryBtnClasses =
-    'group relative flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-white/25 bg-white/90 px-5 text-[13px] font-semibold text-zinc-950 shadow-[0_8px_30px_rgba(255,255,255,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] transition-all duration-200 hover:scale-[1.015] hover:bg-white hover:shadow-[0_10px_36px_rgba(255,255,255,0.22)] active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:scale-100';
-
-  const secondaryBtnClasses =
-    'flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-5 text-[13px] font-medium text-white/80 backdrop-blur-xl transition-all duration-200 hover:scale-[1.01] hover:border-white/20 hover:bg-white/[0.08] hover:text-white active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:scale-100';
-
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/75 p-4 sm:p-6 backdrop-blur-2xl animate-auth-backdrop"
+      className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/75 p-4 sm:p-6 backdrop-blur-md animate-auth-backdrop"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      {/* Subtle Ambient Cinematic Backlight */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 overflow-hidden"
-      >
-        <div className="absolute left-1/2 top-1/2 h-[420px] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/[0.04] blur-[120px]" />
-        <div className="absolute left-1/2 top-[38%] h-[260px] w-[320px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-400/[0.06] blur-[100px]" />
-      </div>
-
-      {/* Liquid Glass Card */}
+      {/* Main Dark Morphism Auth Card (No rainbow background) */}
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="auth-modal-title"
         tabIndex={-1}
-        className="relative my-auto w-full max-w-[420px] overflow-hidden rounded-[28px] border border-white/10 bg-black/40 p-7 sm:p-8 text-white shadow-[0_32px_100px_rgba(0,0,0,0.85),0_0_50px_rgba(255,255,255,0.03),inset_0_1px_0_0_rgba(255,255,255,0.16)] backdrop-blur-2xl outline-none animate-auth-card"
+        className="auth-morphism-card relative my-auto w-full max-w-[410px] rounded-[28px] p-7 text-white outline-none animate-auth-card"
         onKeyDown={(event) => {
           if (event.key !== 'Tab') return;
           const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
@@ -312,72 +469,53 @@ export default function AuthModal({
           }
         }}
       >
-        {/* Specular Liquid Glass Top Sheen */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-white/[0.07] to-transparent"
-        />
-
-        {/* Top Bar: Brand & Close Button */}
-        <div className="relative flex items-center justify-between">
-          <div className="inline-flex items-center gap-2.5">
-            <span
-              aria-hidden="true"
-              className="h-3.5 w-3.5 rounded-full border border-white/40 bg-gradient-to-br from-white via-zinc-300 to-zinc-600 shadow-[0_0_14px_rgba(255,255,255,0.45)]"
-            />
-            <span className="text-[11px] font-semibold tracking-[0.24em] text-white/90 uppercase">
-              VOID
-            </span>
-          </div>
-
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/50 backdrop-blur-md transition-all duration-200 hover:scale-105 hover:border-white/20 hover:bg-white/[0.1] hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label="Close sign in dialog"
-            onClick={onClose}
-            disabled={busy}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-              className="h-3.5 w-3.5 fill-none stroke-current"
-              strokeLinecap="round"
-              strokeWidth="2"
-            >
-              <path d="m6 6 12 12M18 6 6 18" />
-            </svg>
-          </button>
-        </div>
-
         {user && !user.is_anonymous ? (
           /* ── Signed-in Account View ── */
-          <div className="relative mt-7 flex flex-col gap-6">
-            <div className="space-y-1.5 text-center">
-              <p className="text-[10px] font-semibold tracking-[0.2em] text-white/40 uppercase">
-                Authenticated Session
-              </p>
-              <h2
-                id="auth-modal-title"
-                className="text-2xl font-semibold tracking-tight text-white"
-              >
-                You&apos;re signed in
-              </h2>
-              <p className="truncate text-[13px] text-white/50">
-                {user.is_anonymous ? 'Guest session' : accountName}
-              </p>
-            </div>
-
-            <div className="flex flex-col gap-2.5">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] font-medium text-[#8e8e96]">
+                Account
+              </span>
               <button
                 type="button"
-                className={primaryBtnClasses}
+                className="auth-close-btn inline-flex h-9 w-9 items-center justify-center rounded-full text-[#9e9ea6] transition-all hover:text-white disabled:opacity-40"
+                aria-label="Close dialog"
+                onClick={onClose}
+                disabled={busy}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  className="h-4 w-4 fill-none stroke-current"
+                  strokeLinecap="round"
+                  strokeWidth="2"
+                >
+                  <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <h2
+              id="auth-modal-title"
+              className="mt-6 text-[22px] font-semibold tracking-[-0.02em] text-white"
+            >
+              You&apos;re signed in
+            </h2>
+            <p className="mt-1 truncate text-[13.5px] text-[#8e8e96]">
+              {accountName}
+            </p>
+
+            <div className="mt-6 flex flex-col gap-3">
+              <button
+                type="button"
+                className="auth-primary-btn flex h-[46px] w-full items-center justify-center rounded-[12px] text-[14px] font-semibold"
                 onClick={onClose}
               >
                 Continue to VOID
               </button>
               <button
                 type="button"
-                className={secondaryBtnClasses}
+                className="auth-social-btn flex h-[44px] w-full items-center justify-center rounded-[11px] text-[13.5px] font-medium text-white/90"
                 onClick={() => void handleSignOut()}
                 disabled={busy}
               >
@@ -387,7 +525,7 @@ export default function AuthModal({
 
             {error ? (
               <p
-                className="rounded-xl border border-red-400/20 bg-red-500/10 px-3.5 py-2.5 text-center text-xs leading-relaxed text-red-200 backdrop-blur-md"
+                className="mt-4 rounded-xl border border-red-400/20 bg-red-500/10 px-3.5 py-2.5 text-center text-xs leading-relaxed text-red-200"
                 role="alert"
               >
                 {error}
@@ -395,35 +533,73 @@ export default function AuthModal({
             ) : null}
           </div>
         ) : (
-          /* ── Sign-in / Sign-up View ── */
-          <div className="relative mt-6 flex flex-col gap-5">
-            {/* Centered Header */}
-            <div className="space-y-1.5 text-center">
-              <p className="text-[10px] font-medium tracking-[0.2em] text-white/40 uppercase">
-                {user?.is_anonymous
-                  ? 'Guest Workspace'
-                  : 'A Quieter Space To Think'}
-              </p>
-              <h2
-                id="auth-modal-title"
-                className="text-[26px] font-semibold tracking-tight text-white"
+          /* ── Sign up / Sign in Morphism View (Exact Reference Match) ── */
+          <div>
+            {/* Top Bar: Pill Segmented Switch (Sign up / Sign in) + Close Button */}
+            <div className="flex items-center justify-between">
+              <div
+                className="auth-pill-track inline-flex items-center rounded-full p-1"
+                role="tablist"
+                aria-label="Authentication mode"
               >
-                {user?.is_anonymous
-                  ? 'Keep this workspace'
-                  : isCreatingAccount
-                    ? 'Create your account'
-                    : 'Welcome back'}
-              </h2>
-              <p className="text-[13px] leading-relaxed text-white/45">
-                {user?.is_anonymous
-                  ? 'Link a sign-in method to sync this workspace across devices.'
-                  : 'Sign in to pick up where your ideas left off.'}
-              </p>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'signup'}
+                  onClick={() => switchTab('signup')}
+                  className={`rounded-full px-4 py-1.5 text-[13px] font-medium transition-all duration-150 ${
+                    activeTab === 'signup'
+                      ? 'auth-pill-active text-white'
+                      : 'text-[#7c7c85] hover:text-white/80'
+                  }`}
+                >
+                  Sign up
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'signin'}
+                  onClick={() => switchTab('signin')}
+                  className={`rounded-full px-4 py-1.5 text-[13px] font-medium transition-all duration-150 ${
+                    activeTab === 'signin'
+                      ? 'auth-pill-active text-white'
+                      : 'text-[#7c7c85] hover:text-white/80'
+                  }`}
+                >
+                  Sign in
+                </button>
+              </div>
+
+              <button
+                type="button"
+                className="auth-close-btn inline-flex h-9 w-9 items-center justify-center rounded-full text-[#9e9ea6] transition-all hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Close sign in dialog"
+                onClick={onClose}
+                disabled={busy}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  className="h-4 w-4 fill-none stroke-current"
+                  strokeLinecap="round"
+                  strokeWidth="2"
+                >
+                  <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+              </button>
             </div>
+
+            {/* Section Title */}
+            <h2
+              id="auth-modal-title"
+              className="mt-6 mb-5 text-[22px] font-semibold tracking-[-0.02em] text-white"
+            >
+              {activeTab === 'signup' ? 'Create an account' : 'Sign in'}
+            </h2>
 
             {!configured ? (
               <div
-                className="rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-center text-[11.5px] leading-relaxed text-white/70 backdrop-blur-md"
+                className="mb-4 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-center text-[11.5px] leading-relaxed text-white/70"
                 role="status"
               >
                 Add{' '}
@@ -442,264 +618,428 @@ export default function AuthModal({
               </div>
             ) : null}
 
-            {/* Symmetrical OAuth Buttons (Google & GitHub) */}
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                className={oauthBtnClasses}
-                onClick={() => void handleOAuth('google')}
-                disabled={busy || !configured}
-              >
-                <GoogleMark />
-                <span>{user?.is_anonymous ? 'Link Google' : 'Google'}</span>
-              </button>
-              <button
-                type="button"
-                className={oauthBtnClasses}
-                onClick={() => void handleOAuth('github')}
-                disabled={busy || !configured}
-              >
-                <GithubMark />
-                <span>{user?.is_anonymous ? 'Link GitHub' : 'GitHub'}</span>
-              </button>
-            </div>
-
-            {/* Minimalist Divider */}
-            <div className="flex items-center gap-3 text-[11px] text-white/30">
-              <span className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-white/10" />
-              <span className="tracking-wide">or continue with</span>
-              <span className="h-px flex-1 bg-gradient-to-l from-transparent via-white/10 to-white/10" />
-            </div>
-
-            {/* Symmetrical Channel Switcher (Email / Phone) */}
-            <div className="flex flex-col gap-2.5">
-              <div
-                className="grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1 backdrop-blur-md"
-                role="tablist"
-                aria-label="Sign in method"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={channel === 'email'}
-                  className={`h-8 rounded-lg text-xs font-medium transition-all duration-200 ${
-                    channel === 'email'
-                      ? 'border border-white/15 bg-white/[0.1] text-white shadow-[0_2px_10px_rgba(0,0,0,0.25)]'
-                      : 'border border-transparent text-white/45 hover:text-white/80'
-                  }`}
-                  onClick={() => switchChannel('email')}
-                >
-                  Email
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={channel === 'phone'}
-                  className={`h-8 rounded-lg text-xs font-medium transition-all duration-200 ${
-                    channel === 'phone'
-                      ? 'border border-white/15 bg-white/[0.1] text-white shadow-[0_2px_10px_rgba(0,0,0,0.25)]'
-                      : 'border border-transparent text-white/45 hover:text-white/80'
-                  }`}
-                  onClick={() => switchChannel('phone')}
-                >
-                  Phone
-                </button>
-              </div>
-
-              {/* Email Sub-method Toggle (Password vs Email Code) */}
-              {channel === 'email' ? (
-                <div className="flex items-center justify-center gap-4">
-                  <button
-                    type="button"
-                    className={`text-[11.5px] font-medium transition-colors duration-150 ${
-                      emailMethod === 'password'
-                        ? 'text-white underline decoration-white/50 underline-offset-4'
-                        : 'text-white/35 hover:text-white/70'
-                    }`}
-                    onClick={() => {
-                      setEmailMethod('password');
-                      setCodeSent(false);
-                      setCode('');
-                      setError('');
-                      setNotice('');
-                    }}
-                  >
-                    Password
-                  </button>
-                  <span className="h-3 w-px bg-white/10" aria-hidden="true" />
-                  <button
-                    type="button"
-                    className={`text-[11.5px] font-medium transition-colors duration-150 ${
-                      emailMethod === 'otp'
-                        ? 'text-white underline decoration-white/50 underline-offset-4'
-                        : 'text-white/35 hover:text-white/70'
-                    }`}
-                    onClick={() => {
-                      setEmailMethod('otp');
-                      setCodeSent(false);
-                      setCode('');
-                      setError('');
-                      setNotice('');
-                    }}
-                  >
-                    Email code
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            {/* Symmetrical Credentials Form */}
+            {/* Form */}
             <form
-              className="flex flex-col gap-3.5"
+              className="flex flex-col gap-3"
               onSubmit={(event) => void handleSubmit(event)}
             >
-              {channel === 'email' ? (
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-[11.5px] font-medium text-white/60">
-                    Email address
-                  </span>
-                  <input
-                    autoComplete="email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    required
-                    disabled={busy || codeSent}
-                    className={inputClasses}
-                  />
-                </label>
-              ) : (
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-[11.5px] font-medium text-white/60">
-                    Phone number
-                  </span>
-                  <input
-                    autoComplete="tel"
-                    type="tel"
-                    inputMode="tel"
-                    placeholder="+1 555 000 0000"
-                    value={phone}
-                    onChange={(event) => setPhone(event.target.value)}
-                    required
-                    disabled={busy || codeSent}
-                    className={inputClasses}
-                  />
-                  <small className="text-[10.5px] text-white/35">
-                    Include your country code (e.g. +1 or +91).
-                  </small>
-                </label>
-              )}
-
-              {channel === 'email' &&
-              emailMethod === 'password' &&
-              !codeSent ? (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11.5px] font-medium text-white/60">
-                      Password
-                    </span>
-                    {!user?.is_anonymous ? (
-                      <button
-                        type="button"
-                        className="text-[11px] font-medium text-white/45 transition-colors duration-150 hover:text-white"
-                        onClick={() =>
-                          setIsCreatingAccount((current) => !current)
-                        }
-                      >
-                        {isCreatingAccount
-                          ? 'Have an account? Sign in'
-                          : 'Create account'}
-                      </button>
-                    ) : null}
+              {activeTab === 'signup' ? (
+                <>
+                  {/* Row 1: First Name & Last Name */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="auth-input-shell flex h-[46px] items-center rounded-[11px] px-3.5">
+                      <input
+                        type="text"
+                        autoComplete="given-name"
+                        placeholder="First name"
+                        aria-label="First name"
+                        value={firstName}
+                        onChange={(e) => setFirstName(e.target.value)}
+                        disabled={busy || codeSent}
+                        className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                      />
+                    </div>
+                    <div className="auth-input-shell flex h-[46px] items-center rounded-[11px] px-3.5">
+                      <input
+                        type="text"
+                        autoComplete="family-name"
+                        placeholder="Last name"
+                        aria-label="Last name"
+                        value={lastName}
+                        onChange={(e) => setLastName(e.target.value)}
+                        disabled={busy || codeSent}
+                        className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                      />
+                    </div>
                   </div>
-                  <input
-                    autoComplete={
-                      isCreatingAccount ? 'new-password' : 'current-password'
-                    }
-                    type="password"
-                    placeholder="At least 8 characters"
-                    minLength={8}
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    required
-                    disabled={busy}
-                    className={inputClasses}
-                  />
-                </div>
-              ) : null}
 
-              {codeSent ? (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11.5px] font-medium text-white/60">
-                      One-time verification code
-                    </span>
+                  {/* Row 2: Email Input with Envelope Icon */}
+                  <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                    <EnvelopeIcon />
+                    <input
+                      type="email"
+                      autoComplete="email"
+                      placeholder="Enter your email"
+                      aria-label="Email address"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      disabled={busy || codeSent}
+                      className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                    />
+                  </div>
+
+                  {/* Row 3: Country Flag Dropdown + Phone Number */}
+                  <div
+                    ref={countryMenuRef}
+                    className="auth-input-shell relative flex h-[46px] items-center rounded-[11px] px-3"
+                  >
                     <button
                       type="button"
-                      className="text-[11px] font-medium text-white/45 transition-colors duration-150 hover:text-white"
+                      onClick={() => setCountryDropdownOpen((v) => !v)}
+                      disabled={busy || codeSent}
+                      aria-label={`Selected country ${selectedCountry.name} (${selectedCountry.dial})`}
+                      aria-expanded={countryDropdownOpen}
+                      className="mr-2.5 inline-flex shrink-0 items-center gap-1.5 rounded-md py-1 pr-1.5 text-[14px] text-white/90 transition-colors hover:text-white"
+                    >
+                      <span
+                        className="text-[18px] leading-none"
+                        aria-hidden="true"
+                      >
+                        {selectedCountry.flag}
+                      </span>
+                      <svg
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                        className={`h-3.5 w-3.5 text-[#7c7c85] transition-transform duration-150 ${
+                          countryDropdownOpen ? 'rotate-180' : ''
+                        }`}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </button>
+
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      autoComplete="tel"
+                      placeholder={selectedCountry.placeholder}
+                      aria-label="Phone number"
+                      value={phoneLocal}
+                      onChange={(e) => setPhoneLocal(e.target.value)}
+                      disabled={busy || codeSent}
+                      className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                    />
+
+                    {/* Country Selector Dropdown */}
+                    {countryDropdownOpen ? (
+                      <div className=" absolute left-0 top-[calc(100%+6px)] z-30 w-full overflow-hidden rounded-[14px] border border-white/[0.1] bg-[#18181c] shadow-[0_18px_50px_rgba(0,0,0,0.85)]">
+                        <div className="border-b border-white/[0.07] p-2">
+                          <input
+                            type="text"
+                            value={countryQuery}
+                            onChange={(e) => setCountryQuery(e.target.value)}
+                            placeholder="Search country or code…"
+                            aria-label="Search country"
+                            autoFocus
+                            className="h-8 w-full rounded-lg bg-[#222227] px-2.5 text-[12.5px] text-white placeholder:text-[#6c6c74] outline-none"
+                          />
+                        </div>
+                        <div className="max-h-48 overflow-y-auto py-1">
+                          {filteredCountries.map((country) => {
+                            const isSelected =
+                              country.code === selectedCountry.code;
+                            return (
+                              <button
+                                key={country.code}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedCountry(country);
+                                  setCountryDropdownOpen(false);
+                                  setCountryQuery('');
+                                }}
+                                className={`flex w-full items-center justify-between px-3 py-2 text-left text-[13px] transition-colors ${
+                                  isSelected
+                                    ? 'bg-white/[0.08] text-white'
+                                    : 'text-[#d4d4d8] hover:bg-white/[0.04]'
+                                }`}
+                              >
+                                <span className="flex items-center gap-2.5 truncate">
+                                  <span className="text-[16px] leading-none">
+                                    {country.flag}
+                                  </span>
+                                  <span className="truncate">{country.name}</span>
+                                </span>
+                                <span className="ml-2 shrink-0 font-mono text-[12px] text-[#8e8e96]">
+                                  {country.dial}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {filteredCountries.length === 0 ? (
+                            <div className="px-3 py-3 text-center text-[12px] text-[#7c7c85]">
+                              No matching country
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Step 2 on Sign Up: Password or One-Time Code */}
+                  {showSignUpPasswordStep && !codeSent ? (
+                    <div className="flex flex-col gap-2 pt-0.5">
+                      <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                        <LockIcon />
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="Create a password (min 8 chars)"
+                          aria-label="Create a password"
+                          minLength={8}
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          required
+                          disabled={busy}
+                          autoFocus
+                          className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between px-0.5 text-[11.5px] text-[#7c7c85]">
+                        <button
+                          type="button"
+                          onClick={() => void handleSendOtpFallback('email')}
+                          disabled={busy}
+                          className="transition-colors hover:text-white"
+                        >
+                          Send email verification code instead
+                        </button>
+                        {formattedE164Phone ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleSendOtpFallback('phone')}
+                            disabled={busy}
+                            className="transition-colors hover:text-white"
+                          >
+                            Verify phone SMS
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                /* ── Sign In Tab Fields ── */
+                <>
+                  {signInMethod === 'phone' ? (
+                    <div
+                      ref={countryMenuRef}
+                      className="auth-input-shell relative flex h-[46px] items-center rounded-[11px] px-3"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setCountryDropdownOpen((v) => !v)}
+                        disabled={busy || codeSent}
+                        aria-label={`Selected country ${selectedCountry.name} (${selectedCountry.dial})`}
+                        aria-expanded={countryDropdownOpen}
+                        className="mr-2.5 inline-flex shrink-0 items-center gap-1.5 rounded-md py-1 pr-1.5 text-[14px] text-white/90 transition-colors hover:text-white"
+                      >
+                        <span
+                          className="text-[18px] leading-none"
+                          aria-hidden="true"
+                        >
+                          {selectedCountry.flag}
+                        </span>
+                        <svg
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                          className={`h-3.5 w-3.5 text-[#7c7c85] transition-transform duration-150 ${
+                            countryDropdownOpen ? 'rotate-180' : ''
+                          }`}
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      </button>
+
+                      <input
+                        type="tel"
+                        inputMode="tel"
+                        autoComplete="tel"
+                        placeholder={selectedCountry.placeholder}
+                        aria-label="Phone number"
+                        value={phoneLocal}
+                        onChange={(e) => setPhoneLocal(e.target.value)}
+                        required
+                        disabled={busy || codeSent}
+                        className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                      />
+
+                      {countryDropdownOpen ? (
+                        <div className="absolute left-0 top-[calc(100%+6px)] z-30 w-full overflow-hidden rounded-[14px] border border-white/[0.1] bg-[#18181c] shadow-[0_18px_50px_rgba(0,0,0,0.85)]">
+                          <div className="border-b border-white/[0.07] p-2">
+                            <input
+                              type="text"
+                              value={countryQuery}
+                              onChange={(e) => setCountryQuery(e.target.value)}
+                              placeholder="Search country or code…"
+                              aria-label="Search country"
+                              autoFocus
+                              className="h-8 w-full rounded-lg bg-[#222227] px-2.5 text-[12.5px] text-white placeholder:text-[#6c6c74] outline-none"
+                            />
+                          </div>
+                          <div className="max-h-48 overflow-y-auto py-1">
+                            {filteredCountries.map((country) => {
+                              const isSelected =
+                                country.code === selectedCountry.code;
+                              return (
+                                <button
+                                  key={country.code}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedCountry(country);
+                                    setCountryDropdownOpen(false);
+                                    setCountryQuery('');
+                                  }}
+                                  className={`flex w-full items-center justify-between px-3 py-2 text-left text-[13px] transition-colors ${
+                                    isSelected
+                                      ? 'bg-white/[0.08] text-white'
+                                      : 'text-[#d4d4d8] hover:bg-white/[0.04]'
+                                  }`}
+                                >
+                                  <span className="flex items-center gap-2.5 truncate">
+                                    <span className="text-[16px] leading-none">
+                                      {country.flag}
+                                    </span>
+                                    <span className="truncate">
+                                      {country.name}
+                                    </span>
+                                  </span>
+                                  <span className="ml-2 shrink-0 font-mono text-[12px] text-[#8e8e96]">
+                                    {country.dial}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                      <EnvelopeIcon />
+                      <input
+                        type="email"
+                        autoComplete="email"
+                        placeholder="Enter your email"
+                        aria-label="Email address"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        disabled={busy || codeSent}
+                        className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                      />
+                    </div>
+                  )}
+
+                  {signInMethod === 'password' && !codeSent ? (
+                    <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                      <LockIcon />
+                      <input
+                        type="password"
+                        autoComplete="current-password"
+                        placeholder="Enter your password"
+                        aria-label="Password"
+                        minLength={8}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                        disabled={busy}
+                        className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                      />
+                    </div>
+                  ) : null}
+
+                  {!codeSent ? (
+                    <div className="flex items-center justify-between px-0.5 text-[11.5px] text-[#7c7c85]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSignInMethod((m) =>
+                            m === 'password' ? 'otp' : 'password',
+                          );
+                          setError('');
+                          setNotice('');
+                        }}
+                        className="transition-colors hover:text-white"
+                      >
+                        {signInMethod === 'password'
+                          ? 'Use email one-time code'
+                          : 'Use email & password'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSignInMethod((m) =>
+                            m === 'phone' ? 'password' : 'phone',
+                          );
+                          setError('');
+                          setNotice('');
+                        }}
+                        className="transition-colors hover:text-white"
+                      >
+                        {signInMethod === 'phone'
+                          ? 'Use email instead'
+                          : 'Sign in with phone'}
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              )}
+
+              {/* One-Time Verification Code Input (when OTP sent) */}
+              {codeSent ? (
+                <div className="flex flex-col gap-2">
+                  <div className="auth-input-shell flex h-[46px] items-center rounded-[11px] px-3.5">
+                    <input
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      placeholder="Enter 6-digit verification code"
+                      aria-label="One-time verification code"
+                      value={code}
+                      onChange={(e) => setCode(e.target.value)}
+                      required
+                      disabled={busy}
+                      autoFocus
+                      className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                    />
+                  </div>
+                  <div className="flex justify-end px-0.5">
+                    <button
+                      type="button"
                       onClick={() => {
                         setCodeSent(false);
                         setCode('');
                         setNotice('');
                       }}
+                      className="text-[11.5px] text-[#7c7c85] transition-colors hover:text-white"
                     >
-                      Change {channel === 'email' ? 'email' : 'phone'}
+                      Change {otpTargetChannel === 'email' ? 'email' : 'phone'}
                     </button>
                   </div>
-                  <input
-                    autoComplete="one-time-code"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    placeholder="Enter 6-digit code"
-                    value={code}
-                    onChange={(event) => setCode(event.target.value)}
-                    required
-                    disabled={busy}
-                    autoFocus
-                    className={inputClasses}
-                  />
                 </div>
               ) : null}
 
+              {/* Primary CTA Button */}
               <button
                 type="submit"
-                className={`${primaryBtnClasses} mt-1`}
                 disabled={busy || !configured}
+                className="auth-primary-btn mt-2 flex h-[46px] w-full items-center justify-center rounded-[12px] text-[14px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"
               >
-                <span>
-                  {busy
-                    ? 'Please wait…'
-                    : codeSent
-                      ? user?.is_anonymous
-                        ? 'Verify and link'
-                        : 'Verify code'
-                      : channel === 'phone' || emailMethod === 'otp'
-                        ? user?.is_anonymous
-                          ? channel === 'phone'
-                            ? 'Link phone'
-                            : 'Link email'
-                          : 'Send one-time code'
-                        : isCreatingAccount
-                          ? 'Create account'
-                          : user?.is_anonymous
-                            ? 'Link email and password'
-                            : 'Sign in'}
-                </span>
-                {!busy && !codeSent ? (
-                  <span
-                    aria-hidden="true"
-                    className="text-sm leading-none transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
-                  >
-                    ↗
-                  </span>
-                ) : null}
+                {busy
+                  ? 'Please wait…'
+                  : codeSent
+                    ? 'Verify code'
+                    : activeTab === 'signup'
+                      ? 'Create an account'
+                      : signInMethod === 'password'
+                        ? 'Sign in'
+                        : 'Send one-time code'}
               </button>
             </form>
 
             {error ? (
               <p
-                className="rounded-xl border border-red-400/20 bg-red-500/10 px-3.5 py-2.5 text-center text-xs leading-relaxed text-red-200 backdrop-blur-md"
+                className="mt-3.5 rounded-xl border border-red-400/20 bg-red-500/10 px-3.5 py-2.5 text-center text-xs leading-relaxed text-red-200"
                 role="alert"
               >
                 {error}
@@ -708,37 +1048,59 @@ export default function AuthModal({
 
             {notice ? (
               <p
-                className="rounded-xl border border-white/15 bg-white/[0.05] px-3.5 py-2.5 text-center text-xs leading-relaxed text-white/80 backdrop-blur-md"
+                className="mt-3.5 rounded-xl border border-white/15 bg-white/[0.05] px-3.5 py-2.5 text-center text-xs leading-relaxed text-white/80"
                 role="status"
               >
                 {notice}
               </p>
             ) : null}
 
-            {/* Footer Actions */}
-            <div className="flex flex-col items-center gap-2.5 border-t border-white/[0.06] pt-4">
+            {/* Divider: OR SIGN IN WITH */}
+            <div className="my-5 flex items-center gap-3">
+              <span className="h-px flex-1 bg-white/[0.06]" />
+              <span className="text-[10.5px] font-semibold tracking-[0.08em] text-[#5c5c66] uppercase">
+                OR SIGN IN WITH
+              </span>
+              <span className="h-px flex-1 bg-white/[0.06]" />
+            </div>
+
+            {/* Social Buttons: Google (left) & GitHub (right, replacing Apple) */}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                aria-label="Sign in with Google"
+                onClick={() => void handleOAuth('google')}
+                disabled={busy || !configured}
+                className="auth-social-btn flex h-[44px] w-full items-center justify-center rounded-[11px] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <GoogleMark />
+              </button>
+              <button
+                type="button"
+                aria-label="Sign in with GitHub"
+                onClick={() => void handleOAuth('github')}
+                disabled={busy || !configured}
+                className="auth-social-btn flex h-[44px] w-full items-center justify-center rounded-[11px] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <GithubMark />
+              </button>
+            </div>
+
+            {/* Footer */}
+            <div className="mt-5 flex flex-col items-center gap-2 text-center">
+              <p className="text-[11.5px] text-[#66666e]">
+                By creating an account, you agree to our Terms &amp; Service
+              </p>
               {!user ? (
                 <button
                   type="button"
-                  className="group inline-flex items-center justify-center gap-1.5 text-xs font-medium text-white/50 transition-colors duration-200 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={() => void handleGuest()}
                   disabled={busy || !configured}
+                  className="text-[11.5px] font-medium text-[#8a8a93] transition-colors hover:text-white disabled:opacity-40"
                 >
-                  <span>Continue as guest</span>
-                  <span
-                    aria-hidden="true"
-                    className="transition-transform duration-200 group-hover:translate-x-0.5"
-                  >
-                    →
-                  </span>
+                  Continue as guest →
                 </button>
               ) : null}
-
-              <p className="text-center text-[10.5px] text-white/25">
-                {user?.is_anonymous
-                  ? 'Linking preserves your current guest workspace and history.'
-                  : 'Encrypted session managed by Supabase Auth.'}
-              </p>
             </div>
           </div>
         )}
