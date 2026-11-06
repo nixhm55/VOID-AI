@@ -4,9 +4,12 @@ import {
   resolveOmniBaseUrl,
   synthesizeSpeechViaDeepgram,
   synthesizeSpeechViaOmniRoute,
-} from '../src/lib/tools';
-import { authenticateApiRequest, authenticationErrorResponse } from '../src/lib/server/supabase-auth';
-import { createVercelHandler } from '../src/lib/server/vercel';
+} from '../src/lib/tools/index.js';
+import {
+  authenticateApiRequest,
+  authenticationErrorResponse,
+} from '../src/lib/server/supabase-auth.js';
+import { createVercelHandler } from '../src/lib/server/vercel.js';
 
 async function handle(req: Request): Promise<Response> {
   try {
@@ -18,8 +21,16 @@ async function handle(req: Request): Promise<Response> {
 
     if (req.method === 'GET') {
       const url = new URL(req.url);
-      text = (url.searchParams.get('q') ?? url.searchParams.get('text') ?? '').trim();
-      lang = (url.searchParams.get('tl') ?? url.searchParams.get('lang') ?? 'en-US').trim();
+      text = (
+        url.searchParams.get('q') ??
+        url.searchParams.get('text') ??
+        ''
+      ).trim();
+      lang = (
+        url.searchParams.get('tl') ??
+        url.searchParams.get('lang') ??
+        'en-US'
+      ).trim();
       voice = url.searchParams.get('voice')?.trim() || undefined;
     } else {
       const body = (await req.json()) as Record<string, unknown>;
@@ -30,7 +41,10 @@ async function handle(req: Request): Promise<Response> {
     }
 
     if (!text) {
-      return Response.json({ error: 'Missing text parameter q' }, { status: 400 });
+      return Response.json(
+        { error: 'Missing text parameter q' },
+        { status: 400 },
+      );
     }
 
     const deepgramModel = resolveDeepgramVoiceModel(voice);

@@ -6,7 +6,7 @@ import {
   OPENROUTER_ENDPOINT,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
-} from './tools/config';
+} from './tools/config.js';
 import {
   VOID_SYSTEM_PROMPT,
   buildLockedIdentityReply,
@@ -14,7 +14,7 @@ import {
   hasNixUnlockKey,
   isModelIdentityQuery,
   normalizeVoidIdentity,
-} from './tools/identity_guard';
+} from './tools/identity_guard.js';
 import {
   type OmniSearchResponse,
   type OmniSearchResultItem,
@@ -25,7 +25,7 @@ import {
   formatSearchResultsForAgent,
   isRealtimeRefusalResponse,
   shouldTriggerWebSearch,
-} from './tools/search_engine';
+} from './tools/search_engine.js';
 
 export {
   AI_MODELS,

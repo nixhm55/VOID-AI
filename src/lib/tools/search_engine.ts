@@ -1,4 +1,4 @@
-import { isModelIdentityQuery } from './identity_guard';
+import { isModelIdentityQuery } from './identity_guard.js';
 
 export interface OmniSearchResultItem {
   title: string;

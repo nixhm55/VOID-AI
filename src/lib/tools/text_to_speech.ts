@@ -3,7 +3,7 @@ import {
   resolveDeepgramApiKey,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
-} from './config';
+} from './config.js';
 
 export interface TtsSynthesisRequest {
   text: string;

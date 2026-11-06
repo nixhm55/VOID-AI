@@ -3,12 +3,12 @@ import {
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
   runOmniRouteAgentStream,
-} from '../src/lib/omniroute-agent';
+} from '../src/lib/omniroute-agent.js';
 import {
   authenticateApiRequest,
   authenticationErrorResponse,
-} from '../src/lib/server/supabase-auth';
-import { createVercelHandler } from '../src/lib/server/vercel';
+} from '../src/lib/server/supabase-auth.js';
+import { createVercelHandler } from '../src/lib/server/vercel.js';
 
 export const config = { supportsResponseStreaming: true };
 

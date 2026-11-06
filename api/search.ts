@@ -2,12 +2,12 @@ import {
   executeOmniRouteSearch,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
-} from '../src/lib/tools';
+} from '../src/lib/tools/index.js';
 import {
   authenticateApiRequest,
   authenticationErrorResponse,
-} from '../src/lib/server/supabase-auth';
-import { createVercelHandler } from '../src/lib/server/vercel';
+} from '../src/lib/server/supabase-auth.js';
+import { createVercelHandler } from '../src/lib/server/vercel.js';
 
 const DEFAULT_MAX_RESULTS = 6;
 const MAX_RESULTS = 10;
@@ -39,13 +39,16 @@ async function post(req: Request): Promise<Response> {
       apiKeys: resolveOmniApiKeys(),
     });
 
-    return Response.json({
-      ...results,
-      results: results.results.slice(0, maxResults),
-    }, {
-      status: 200,
-      headers: { 'Cache-Control': 'private, no-store' },
-    });
+    return Response.json(
+      {
+        ...results,
+        results: results.results.slice(0, maxResults),
+      },
+      {
+        status: 200,
+        headers: { 'Cache-Control': 'private, no-store' },
+      },
+    );
   } catch (error) {
     const authResponse = authenticationErrorResponse(error);
     if (authResponse) return authResponse;
