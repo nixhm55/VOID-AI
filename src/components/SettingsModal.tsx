@@ -5,6 +5,15 @@ import {
   type UserSettings,
   type VoiceOption,
 } from '../lib/chat-storage';
+import {
+  EMBEDDING_MODEL_CATALOG,
+  MODERATION_MODEL_CATALOG,
+  STT_MODEL_CATALOG,
+  TTS_MODEL_CATALOG,
+  type TranscriptionModelId,
+  type VoidAiEmbeddingModel,
+  type VoidAiTtsModel,
+} from '../lib/tools/config';
 import { authenticatedFetch } from '../lib/api-fetch';
 
 interface SettingsModalProps {
@@ -15,18 +24,43 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type SettingsTab = 'voice' | 'general';
+type SettingsTab = 'voice' | 'models' | 'general';
+type VoiceBrowseView = null | 'Female' | 'Male' | 'gpt';
 
 const SPEED_OPTIONS = [0.9, 1.0, 1.1, 1.2];
+
+const providerLabel = (provider: VoiceOption['provider']) => {
+  if (provider === 'openai') return 'GPT Natural';
+  if (provider === 'deepgram') return 'Deepgram';
+  return 'ElevenLabs';
+};
 
 const voiceMeta = (voice: VoiceOption) =>
   [
     voice.accent ?? voice.language,
     voice.gender,
-    voice.provider === 'deepgram' ? 'Deepgram' : 'ElevenLabs',
+    providerLabel(voice.provider),
+    voice.supportedModels && voice.supportedModels.length === 1
+      ? 'gpt-4o-mini-tts only (auto-fallback)'
+      : null,
   ]
     .filter(Boolean)
     .join(' · ');
+
+function RoleBadge({ role }: { role: string }) {
+  const isPrimary = role === 'Primary';
+  return (
+    <span
+      className={`rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+        isPrimary
+          ? 'border-[#b39dff]/40 bg-[#b39dff]/15 text-[#d8c8ff]'
+          : 'border-white/[0.12] bg-white/[0.04] text-[#9a9aa2]'
+      }`}
+    >
+      {role}
+    </span>
+  );
+}
 
 function Switch({
   checked,
@@ -96,7 +130,10 @@ export default function SettingsModal({
   onClose,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('voice');
-  const [voiceGender, setVoiceGender] = useState<'Female' | 'Male' | null>(null);
+  const [voiceView, setVoiceView] = useState<VoiceBrowseView>(null);
+  const [gptGenderFilter, setGptGenderFilter] = useState<
+    'All' | 'Male' | 'Female'
+  >('All');
   const [query, setQuery] = useState('');
   const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -106,7 +143,8 @@ export default function SettingsModal({
     if (!open) {
       setConfirmClear(false);
       setQuery('');
-      setVoiceGender(null);
+      setVoiceView(null);
+      setGptGenderFilter('All');
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current = null;
@@ -126,21 +164,37 @@ export default function SettingsModal({
 
   const voiceCounts = useMemo(
     () => ({
-      Female: AVAILABLE_TTS_VOICES.filter((voice) => voice.gender === 'Female').length,
-      Male: AVAILABLE_TTS_VOICES.filter((voice) => voice.gender === 'Male').length,
+      Female: AVAILABLE_TTS_VOICES.filter((voice) => voice.gender === 'Female')
+        .length,
+      Male: AVAILABLE_TTS_VOICES.filter((voice) => voice.gender === 'Male')
+        .length,
+      gpt: AVAILABLE_TTS_VOICES.filter((voice) => voice.provider === 'openai')
+        .length,
     }),
     [],
   );
 
   const selectedVoice =
     AVAILABLE_TTS_VOICES.find((voice) => voice.id === settings.ttsVoice) ??
-    AVAILABLE_TTS_VOICES.find((voice) => voice.id === DEFAULT_USER_SETTINGS.ttsVoice) ??
+    AVAILABLE_TTS_VOICES.find(
+      (voice) => voice.id === DEFAULT_USER_SETTINGS.ttsVoice,
+    ) ??
     null;
 
-  const genderVoices = useMemo(() => {
-    if (!voiceGender) return [];
+  const filteredVoices = useMemo(() => {
+    if (!voiceView) return [];
     const q = query.trim().toLowerCase();
-    return AVAILABLE_TTS_VOICES.filter((voice) => voice.gender === voiceGender).filter(
+
+    return AVAILABLE_TTS_VOICES.filter((voice) => {
+      if (voiceView === 'gpt') {
+        if (voice.provider !== 'openai') return false;
+        if (gptGenderFilter !== 'All' && voice.gender !== gptGenderFilter) {
+          return false;
+        }
+        return true;
+      }
+      return voice.gender === voiceView;
+    }).filter(
       (voice) =>
         !q ||
         [voice.name, voice.accent, voice.language, voice.description, voice.id]
@@ -149,7 +203,7 @@ export default function SettingsModal({
           .toLowerCase()
           .includes(q),
     );
-  }, [voiceGender, query]);
+  }, [voiceView, gptGenderFilter, query]);
 
   if (!open) return null;
 
@@ -174,6 +228,8 @@ export default function SettingsModal({
             'Hello! I am VOID, developed by MN. Ready to help with your project.',
           tl: voice.previewLang ?? 'en-US',
           voice: voice.id,
+          model: settings.ttsModel || 'gpt-4o-mini-tts',
+          speed: settings.ttsSpeed || 1.0,
         }),
       });
       if (!res.ok) {
@@ -218,6 +274,9 @@ export default function SettingsModal({
           <div className="flex items-center gap-2">
             <span className="truncate text-[13px] font-medium text-[#ededed]">
               {voice.name}
+            </span>
+            <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#a1a1aa]">
+              {voice.gender}
             </span>
             {isDefault ? (
               <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#8a8a8f]">
@@ -280,10 +339,10 @@ export default function SettingsModal({
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="flex h-[620px] max-h-[calc(100vh-2rem)] w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-white/[0.09] bg-[#111111] text-[#ededed] shadow-2xl md:flex-row"
+        className="flex h-[640px] max-h-[calc(100vh-2rem)] w-full max-w-[740px] flex-col overflow-hidden rounded-2xl border border-white/[0.09] bg-[#111111] text-[#ededed] shadow-2xl md:flex-row"
       >
         {/* Left navigation */}
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] bg-[#0d0d0d] px-3 py-2 md:w-[196px] md:flex-col md:items-stretch md:gap-0.5 md:overflow-visible md:border-b-0 md:border-r md:px-3 md:py-4">
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] bg-[#0d0d0d] px-3 py-2 md:w-[200px] md:flex-col md:items-stretch md:gap-0.5 md:overflow-visible md:border-b-0 md:border-r md:px-3 md:py-4">
           <div className="hidden px-2 pb-3 text-[12.5px] font-semibold text-[#ededed] md:block">
             Settings
           </div>
@@ -292,7 +351,7 @@ export default function SettingsModal({
             active={activeTab === 'voice'}
             onClick={() => {
               setActiveTab('voice');
-              setVoiceGender(null);
+              setVoiceView(null);
               setQuery('');
             }}
             icon={
@@ -311,7 +370,30 @@ export default function SettingsModal({
               </svg>
             }
           >
-            Voice
+            Voice & Speech
+          </NavItem>
+
+          <NavItem
+            active={activeTab === 'models'}
+            onClick={() => setActiveTab('models')}
+            icon={
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-4 w-4"
+              >
+                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" />
+              </svg>
+            }
+          >
+            AI Models
           </NavItem>
 
           <NavItem
@@ -351,12 +433,18 @@ export default function SettingsModal({
           <div className="flex items-start justify-between gap-4 px-5 pt-5 md:px-6">
             <div>
               <h2 className="text-[15px] font-semibold text-white">
-                {activeTab === 'voice' ? 'Voice' : 'General'}
+                {activeTab === 'voice'
+                  ? 'Voice & Speech'
+                  : activeTab === 'models'
+                    ? 'Specialized AI Models & Fallbacks'
+                    : 'General'}
               </h2>
               <p className="mt-1 text-[12px] leading-relaxed text-[#8a8a8f]">
                 {activeTab === 'voice'
-                  ? 'Choose the voice used for spoken replies and previews.'
-                  : 'Interface and conversation preferences for this browser.'}
+                  ? 'Choose Male or Female voices, configure GPT Speech synthesis, and select your transcription engine.'
+                  : activeTab === 'models'
+                    ? 'Separated model selectors and automatic fallback chains for Memory/Embeddings, Speech (TTS), Transcription (STT), and Moderation.'
+                    : 'Interface and conversation preferences for this browser.'}
               </p>
             </div>
 
@@ -383,7 +471,7 @@ export default function SettingsModal({
 
           {activeTab === 'voice' ? (
             <>
-              {voiceGender === null ? (
+              {voiceView === null ? (
                 <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 md:px-6">
                   <div className="text-[11px] font-medium tracking-wide text-[#6f6f76]">
                     CURRENT VOICE
@@ -394,6 +482,11 @@ export default function SettingsModal({
                         <span className="truncate text-[13px] font-medium text-[#ededed]">
                           {selectedVoice ? selectedVoice.name : 'Not selected'}
                         </span>
+                        {selectedVoice ? (
+                          <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#a1a1aa]">
+                            {selectedVoice.gender}
+                          </span>
+                        ) : null}
                         {selectedVoice &&
                         selectedVoice.id === DEFAULT_USER_SETTINGS.ttsVoice ? (
                           <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#8a8a8f]">
@@ -412,30 +505,32 @@ export default function SettingsModal({
                         aria-label={`Preview ${selectedVoice.name}`}
                         className="shrink-0 rounded-md px-2 py-1 text-[11.5px] font-medium text-[#a1a1a6] transition-colors hover:bg-white/[0.08] hover:text-white"
                       >
-                        {previewingVoice === selectedVoice.id ? 'Stop' : 'Preview'}
+                        {previewingVoice === selectedVoice.id
+                          ? 'Stop'
+                          : 'Preview'}
                       </button>
                     ) : null}
                   </div>
 
-                  <div className="mt-6 text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                    BROWSE VOICES
+                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
+                    BROWSE VOICES BY GENDER (MALE / FEMALE) & GPT SPEECH
                   </div>
-                  <div className="mt-2 space-y-1">
-                    {(['Female', 'Male'] as const).map((gender) => (
+                  <div className="mt-2 space-y-1.5">
+                    {(['Male', 'Female'] as const).map((gender) => (
                       <button
                         key={gender}
                         type="button"
                         onClick={() => {
-                          setVoiceGender(gender);
+                          setVoiceView(gender);
                           setQuery('');
                         }}
                         className="flex w-full items-center justify-between rounded-lg border border-white/[0.07] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.04]"
                       >
                         <span className="text-[13px] font-medium text-[#ededed]">
-                          {gender} voices
+                          {gender}
                         </span>
                         <span className="flex items-center gap-2 text-[11.5px] text-[#8a8a8f]">
-                          {voiceCounts[gender]}
+                          {voiceCounts[gender]} voices
                           <svg
                             className="h-3.5 w-3.5"
                             viewBox="0 0 24 24"
@@ -450,6 +545,163 @@ export default function SettingsModal({
                         </span>
                       </button>
                     ))}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVoiceView('gpt');
+                        setGptGenderFilter('All');
+                        setQuery('');
+                      }}
+                      className="flex w-full items-center justify-between rounded-lg border border-[#b39dff]/25 bg-[#b39dff]/[0.06] px-3 py-2.5 text-left transition-colors hover:bg-[#b39dff]/[0.11]"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[13px] font-medium text-white">
+                            GPT Speech (Natural Voices & Models)
+                          </span>
+                          <RoleBadge role="Primary" />
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-[#a1a1aa]">
+                          Active model: {settings.ttsModel} · Automatic fallback:
+                          gpt-4o-mini-tts → tts-1-hd → tts-1
+                        </p>
+                      </div>
+                      <span className="flex items-center gap-2 text-[11.5px] text-[#d8c8ff]">
+                        {voiceCounts.gpt} voices
+                        <svg
+                          className="h-3.5 w-3.5"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Speech Model Selector directly accessible in Voice tab */}
+                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
+                    SPEECH / TEXT-TO-SPEECH MODEL SELECTOR
+                  </div>
+                  <div className="mt-2 space-y-1.5">
+                    {TTS_MODEL_CATALOG.map((m) => {
+                      const active = settings.ttsModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({
+                              ...settings,
+                              ttsModel: m.id as VoidAiTtsModel,
+                            })
+                          }
+                          className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                            active
+                              ? 'border-white/[0.22] bg-white/[0.06]'
+                              : 'border-white/[0.07] hover:bg-white/[0.03]'
+                          }`}
+                        >
+                          <div className="min-w-0 pr-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                                {m.name}
+                              </span>
+                              <RoleBadge role={m.role} />
+                            </div>
+                            <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                              {m.description}
+                            </p>
+                          </div>
+                          <span
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                              active
+                                ? 'border-white bg-white text-black'
+                                : 'border-white/25'
+                            }`}
+                          >
+                            {active ? (
+                              <svg
+                                className="h-2.5 w-2.5"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            ) : null}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Transcription / STT Model Selector */}
+                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
+                    TRANSCRIPTION / SPEECH-TO-TEXT MODEL SELECTOR
+                  </div>
+                  <div className="mt-2 space-y-1.5">
+                    {STT_MODEL_CATALOG.map((m) => {
+                      const active = settings.sttModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({
+                              ...settings,
+                              sttModel: m.id as TranscriptionModelId,
+                            })
+                          }
+                          className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                            active
+                              ? 'border-white/[0.22] bg-white/[0.06]'
+                              : 'border-white/[0.07] hover:bg-white/[0.03]'
+                          }`}
+                        >
+                          <div className="min-w-0 pr-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                                {m.name}
+                              </span>
+                              <RoleBadge role={m.role} />
+                            </div>
+                            <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                              {m.description}
+                            </p>
+                          </div>
+                          <span
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                              active
+                                ? 'border-white bg-white text-black'
+                                : 'border-white/25'
+                            }`}
+                          >
+                            {active ? (
+                              <svg
+                                className="h-2.5 w-2.5"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            ) : null}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ) : (
@@ -458,7 +710,7 @@ export default function SettingsModal({
                     <button
                       type="button"
                       onClick={() => {
-                        setVoiceGender(null);
+                        setVoiceView(null);
                         setQuery('');
                       }}
                       className="flex items-center gap-1 text-[12.5px] font-medium text-[#8a8a8f] transition-colors hover:text-white"
@@ -474,12 +726,71 @@ export default function SettingsModal({
                       >
                         <polyline points="15 18 9 12 15 6" />
                       </svg>
-                      All voices
+                      All voices & speech settings
                     </button>
                     <span className="text-[11.5px] text-[#6f6f76]">
-                      {voiceGender} · {voiceCounts[voiceGender]}
+                      {voiceView === 'gpt'
+                        ? `GPT Natural Voices · ${filteredVoices.length}`
+                        : `${voiceView} · ${voiceCounts[voiceView]}`}
                     </span>
                   </div>
+
+                  {voiceView === 'gpt' ? (
+                    <div className="space-y-2.5 px-5 pt-3 md:px-6">
+                      <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-2.5">
+                        <div className="text-[11px] font-medium text-[#9a9aa2]">
+                          GPT SPEECH MODEL (AUTOMATIC FALLBACK: gpt-4o-mini-tts →
+                          tts-1-hd → tts-1)
+                        </div>
+                        <div className="mt-2 grid grid-cols-3 gap-1.5">
+                          {TTS_MODEL_CATALOG.map((m) => {
+                            const active = settings.ttsModel === m.id;
+                            return (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    ...settings,
+                                    ttsModel: m.id as VoidAiTtsModel,
+                                  })
+                                }
+                                className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
+                                  active
+                                    ? 'border-[#b39dff]/50 bg-[#b39dff]/15 text-white'
+                                    : 'border-white/[0.08] bg-white/[0.02] text-[#a1a1aa] hover:text-white'
+                                }`}
+                              >
+                                <div className="truncate font-mono text-[11.5px] font-medium">
+                                  {m.name}
+                                </div>
+                                <div className="text-[10px] text-[#8a8a8f]">
+                                  {m.role}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {(['All', 'Male', 'Female'] as const).map((g) => (
+                          <button
+                            key={g}
+                            type="button"
+                            onClick={() => setGptGenderFilter(g)}
+                            className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                              gptGenderFilter === g
+                                ? 'bg-white/[0.12] text-white'
+                                : 'text-[#8a8a8f] hover:bg-white/[0.05] hover:text-white'
+                            }`}
+                          >
+                            {g}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
                   <div className="px-5 pt-3 md:px-6">
                     <div className="relative">
@@ -498,17 +809,17 @@ export default function SettingsModal({
                       <input
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        placeholder={`Search ${voiceGender.toLowerCase()} voices`}
-                        aria-label={`Search ${voiceGender.toLowerCase()} voices`}
+                        placeholder={`Search ${voiceView === 'gpt' ? 'GPT' : voiceView} voices`}
+                        aria-label={`Search ${voiceView === 'gpt' ? 'GPT' : voiceView} voices`}
                         className="h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.03] pl-9 pr-3 text-[13px] text-[#ededed] placeholder:text-[#6f6f76] focus:border-white/[0.2] focus:outline-none"
                       />
                     </div>
                   </div>
 
                   <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-5 py-4 md:px-6">
-                    {genderVoices.map(renderVoiceRow)}
+                    {filteredVoices.map(renderVoiceRow)}
 
-                    {genderVoices.length === 0 ? (
+                    {filteredVoices.length === 0 ? (
                       <p className="px-1 py-6 text-center text-[12.5px] text-[#8a8a8f]">
                         No voices match “{query.trim()}”.
                       </p>
@@ -570,6 +881,202 @@ export default function SettingsModal({
                 </div>
               </div>
             </>
+          ) : activeTab === 'models' ? (
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4 md:px-6">
+              {/* 1. Memory / Embeddings */}
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[12px] font-semibold tracking-wide text-white">
+                    1. MEMORY / EMBEDDINGS
+                  </div>
+                  <span className="text-[11px] text-[#8a8a8f]">
+                    Dimension-isolated indexes (3072d / 1536d)
+                  </span>
+                </div>
+                <div className="mt-2.5 space-y-1.5">
+                  {EMBEDDING_MODEL_CATALOG.map((m) => {
+                    const active = settings.embeddingModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateSettings({
+                            ...settings,
+                            embeddingModel: m.id as VoidAiEmbeddingModel,
+                          })
+                        }
+                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                          active
+                            ? 'border-white/[0.22] bg-white/[0.06]'
+                            : 'border-white/[0.07] hover:bg-white/[0.03]'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                              {m.name}
+                            </span>
+                            <RoleBadge role={m.role} />
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
+                            {m.description}
+                          </p>
+                        </div>
+                        <span className="font-mono text-[11px] text-[#a1a1aa]">
+                          {m.dimensions}d
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 2. Speech / Text-to-Speech */}
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[12px] font-semibold tracking-wide text-white">
+                    2. SPEECH / TEXT-TO-SPEECH
+                  </div>
+                  <span className="text-[11px] text-[#8a8a8f]">
+                    Primary → First fallback → Second fallback
+                  </span>
+                </div>
+                <div className="mt-2.5 space-y-1.5">
+                  {TTS_MODEL_CATALOG.map((m) => {
+                    const active = settings.ttsModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateSettings({
+                            ...settings,
+                            ttsModel: m.id as VoidAiTtsModel,
+                          })
+                        }
+                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                          active
+                            ? 'border-white/[0.22] bg-white/[0.06]'
+                            : 'border-white/[0.07] hover:bg-white/[0.03]'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                              {m.name}
+                            </span>
+                            <RoleBadge role={m.role} />
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
+                            {m.description}
+                          </p>
+                        </div>
+                        <span className="text-[11px] text-[#a1a1aa]">
+                          {active ? 'Selected' : 'Auto-fallback'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3. Transcription / Speech-to-Text */}
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[12px] font-semibold tracking-wide text-white">
+                    3. TRANSCRIPTION / SPEECH-TO-TEXT
+                  </div>
+                  <span className="text-[11px] text-[#8a8a8f]">
+                    Auto-detects EN / ML / HI without translation
+                  </span>
+                </div>
+                <div className="mt-2.5 space-y-1.5">
+                  {STT_MODEL_CATALOG.map((m) => {
+                    const active = settings.sttModel === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdateSettings({
+                            ...settings,
+                            sttModel: m.id as TranscriptionModelId,
+                          })
+                        }
+                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                          active
+                            ? 'border-white/[0.22] bg-white/[0.06]'
+                            : 'border-white/[0.07] hover:bg-white/[0.03]'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                              {m.name}
+                            </span>
+                            <RoleBadge role={m.role} />
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
+                            {m.description}
+                          </p>
+                        </div>
+                        <span className="text-[11px] text-[#a1a1aa]">
+                          {active ? 'Selected' : 'Available'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 4. Moderation */}
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-[12px] font-semibold tracking-wide text-white">
+                      4. MODERATION
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
+                      Multimodal text & image safety filter (fails open safely)
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.moderationEnabled}
+                    label="Enable content moderation"
+                    onChange={() =>
+                      onUpdateSettings({
+                        ...settings,
+                        moderationEnabled: !settings.moderationEnabled,
+                      })
+                    }
+                  />
+                </div>
+                <div className="mt-2.5 space-y-1.5">
+                  {MODERATION_MODEL_CATALOG.map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex w-full items-center justify-between rounded-lg border border-white/[0.22] bg-white/[0.06] px-3 py-2"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                            {m.name}
+                          </span>
+                          <RoleBadge role={m.role} />
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
+                          {m.description}
+                        </p>
+                      </div>
+                      <span className="text-[11px] text-emerald-400">
+                        Active
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5 md:px-6">
               <div className="flex items-center justify-between gap-4">
@@ -595,14 +1102,17 @@ export default function SettingsModal({
 
               <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-4">
                 <div className="text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                  CONNECTED TOOLS
+                  CONNECTED TOOLS & SPECIALIZED MODELS
                 </div>
                 <div className="mt-3 flex flex-wrap gap-1.5">
                   {[
                     'VOID Combo',
+                    'MIRASH OpenRouter',
                     'Web search',
-                    'ElevenLabs TTS',
-                    'Deepgram Flux TTS',
+                    `Embeddings: ${settings.embeddingModel}`,
+                    `TTS: ${settings.ttsModel}`,
+                    `STT: ${settings.sttModel}`,
+                    'Moderation: omni-moderation-latest',
                   ].map((tool) => (
                     <span
                       key={tool}

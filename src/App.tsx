@@ -389,6 +389,7 @@ export default function App() {
         messages: historyPayload,
         model: model?.key || 'void-combo',
         effort: effectiveEffort,
+        moderationEnabled: settings.moderationEnabled,
         signal: controller.current.signal,
         onChunk: (_delta, fullText) => {
           if (!createdAiBubble) {
@@ -572,6 +573,7 @@ export default function App() {
                   text={msg.text}
                   isStreaming={streamingId === msg.id}
                   ttsVoice={settings.ttsVoice}
+                  ttsModel={settings.ttsModel}
                   ttsSpeed={settings.ttsSpeed}
                 />
               ),
@@ -633,6 +635,7 @@ export default function App() {
               squash={0.12}
               tilt={8}
               pressScale={0.96}
+              sttModel={settings.sttModel}
             />
           </div>
         </div>

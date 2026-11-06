@@ -16,6 +16,7 @@ export interface StreamChatOptions {
   messages: StreamChatMessage[];
   model?: string;
   effort?: string;
+  moderationEnabled?: boolean;
   signal?: AbortSignal;
   onChunk: (deltaText: string, fullText: string) => void;
 }
@@ -24,6 +25,7 @@ export async function streamChatCompletion({
   messages,
   model = 'void-combo',
   effort = 'High',
+  moderationEnabled = true,
   signal,
   onChunk,
 }: StreamChatOptions): Promise<string> {
@@ -59,6 +61,7 @@ export async function streamChatCompletion({
       messages,
       model: model || 'void-combo',
       effort: effort || 'High',
+      moderationEnabled,
     }),
     signal,
   });
@@ -171,8 +174,11 @@ export async function streamChatCompletion({
     signal?.removeEventListener('abort', onAbort);
     if (signal?.aborted) {
       await reader.cancel().catch(() => {});
-      throw new DOMException('Aborted', 'AbortError');
     }
+  }
+
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
   }
 
   return normalizedFullText;

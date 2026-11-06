@@ -6,6 +6,7 @@ interface AiMessageProps {
   text: string;
   isStreaming?: boolean;
   ttsVoice?: string;
+  ttsModel?: string;
   ttsSpeed?: number;
 }
 
@@ -290,7 +291,8 @@ function renderTextBlocks(segment: string, blockKeyPrefix: string): ReactNode[] 
 export default function AiMessage({
   text,
   isStreaming = false,
-  ttsVoice = 'rachel',
+  ttsVoice = 'flux-meena-en',
+  ttsModel = 'gpt-4o-mini-tts',
   ttsSpeed = 1.0,
 }: AiMessageProps) {
   const [copiedAll, setCopiedAll] = useState(false);
@@ -360,11 +362,13 @@ export default function AiMessage({
             text: chunk.text,
             tl: chunk.tl,
             voice: ttsVoice,
+            model: ttsModel,
+            speed: ttsSpeed,
           }),
         });
         if (!res.ok) return null;
         const provider =
-          res.headers.get('X-TTS-Provider') || 'elevenlabs-omniroute';
+          res.headers.get('X-TTS-Provider') || 'voidai-tts';
         const blob = await res.blob();
         if (blob.size === 0) return null;
         const url = URL.createObjectURL(blob);
@@ -421,9 +425,8 @@ export default function AiMessage({
         await new Promise<void>((resolve) => {
           const audio = new Audio(segment.url);
           audio.preservesPitch = true;
-          // Server-side voices (ElevenLabs, Deepgram Flux) render at natural
-          // pace; only the compressed neural fallback needs a speed-up.
           const baseRate =
+            segment.provider === 'voidai-tts' ||
             segment.provider === 'elevenlabs-omniroute' ||
             segment.provider === 'deepgram-flux'
               ? 1.0

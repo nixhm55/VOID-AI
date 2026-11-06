@@ -1,9 +1,14 @@
 import {
   OPENROUTER_API_KEY,
+  formatSseDataFrame,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
   runOmniRouteAgentStream,
 } from '../src/lib/omniroute-agent.js';
+import {
+  buildModerationPayloadInput,
+  moderateContentViaVoidAi,
+} from '../src/lib/tools/index.js';
 import {
   authenticateApiRequest,
   authenticationErrorResponse,
@@ -16,6 +21,8 @@ interface ChatRequestBody {
   messages?: Array<{ role?: string; content?: string }>;
   model?: string;
   effort?: string;
+  moderationEnabled?: boolean;
+  imageUrls?: string[];
 }
 
 async function post(req: Request): Promise<Response> {
@@ -28,6 +35,49 @@ async function post(req: Request): Promise<Response> {
         { error: 'Messages array is required and cannot be empty.' },
         { status: 400 },
       );
+    }
+
+    // Safe pre-moderation check via `omni-moderation-latest` when enabled (default: true).
+    // Fails open if the gateway disables public moderation so ordinary user content is never blocked.
+    if (body.moderationEnabled !== false) {
+      const lastUserMessage = [...rawMessages]
+        .reverse()
+        .find((m) => m && m.role === 'user' && m.content);
+      const userText = String(lastUserMessage?.content ?? '').trim();
+
+      if (userText || (body.imageUrls && body.imageUrls.length > 0)) {
+        const modInput = buildModerationPayloadInput({
+          text: userText,
+          imageUrls: body.imageUrls,
+        });
+        const modResult = await moderateContentViaVoidAi({
+          input: modInput,
+        }).catch(() => null);
+
+        if (modResult?.flagged) {
+          const encoder = new TextEncoder();
+          const flaggedStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  formatSseDataFrame(
+                    'This request was flagged by the safety moderation filter (`omni-moderation-latest`) and could not be processed.',
+                  ),
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          });
+          return new Response(flaggedStream, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'private, no-store',
+            },
+          });
+        }
+      }
     }
 
     const result = await runOmniRouteAgentStream({

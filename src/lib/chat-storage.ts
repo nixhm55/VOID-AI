@@ -1,3 +1,10 @@
+import {
+  OPENAI_TTS_VOICE_SPECS,
+  type TranscriptionModelId,
+  type VoidAiEmbeddingModel,
+  type VoidAiTtsModel,
+} from './tools/index';
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -18,7 +25,12 @@ export interface ChatSession {
 
 export interface UserSettings {
   ttsVoice: string;
+  ttsModel: VoidAiTtsModel;
   ttsSpeed: number;
+  sttModel: TranscriptionModelId;
+  embeddingModel: VoidAiEmbeddingModel;
+  moderationModel: 'omni-moderation-latest';
+  moderationEnabled: boolean;
   autoReadResponses: boolean;
   compactMode: boolean;
 }
@@ -27,10 +39,11 @@ export interface VoiceOption {
   id: string;
   name: string;
   description: string;
-  provider: 'elevenlabs' | 'deepgram';
+  provider: 'openai' | 'deepgram' | 'elevenlabs';
   language: string;
   accent?: string;
   gender: 'Female' | 'Male';
+  supportedModels?: VoidAiTtsModel[];
   previewText?: string;
   previewLang?: string;
 }
@@ -51,8 +64,7 @@ interface DeepgramVoiceSeed {
 }
 
 /** Every Deepgram Flux TTS voice (36 English + Kannada), straight from the
- *  Deepgram voice catalog. The model string is the voice id, so adding a new
- *  Flux voice only needs one row here. */
+ *  Deepgram voice catalog. */
 const DEEPGRAM_FLUX_VOICES: DeepgramVoiceSeed[] = [
   { name: 'Alexis', model: 'flux-alexis-en', language: 'English', accent: 'American', gender: 'Female', description: 'Clear, professional, calm, caring' },
   { name: 'Bree', model: 'flux-bree-en', language: 'English', accent: 'American', gender: 'Female', description: 'Friendly, sweet, kind' },
@@ -94,6 +106,18 @@ const DEEPGRAM_FLUX_VOICES: DeepgramVoiceSeed[] = [
 ];
 
 export const AVAILABLE_TTS_VOICES: VoiceOption[] = [
+  ...OPENAI_TTS_VOICE_SPECS.map((spec) => ({
+    id: spec.id,
+    name: spec.name,
+    description: spec.description,
+    provider: 'openai' as const,
+    language: 'Multilingual',
+    accent: 'Natural GPT',
+    gender: spec.gender,
+    supportedModels: spec.supportedModels,
+    previewText: ENGLISH_PREVIEW_TEXT,
+    previewLang: 'en-US',
+  })),
   ...DEEPGRAM_FLUX_VOICES.map((voice) => ({
     id: voice.model,
     name: voice.name,
@@ -128,16 +152,6 @@ export const AVAILABLE_TTS_VOICES: VoiceOption[] = [
     previewText: ENGLISH_PREVIEW_TEXT,
     previewLang: 'en-US',
   },
-  {
-    id: 'alloy',
-    name: 'Alloy',
-    description: 'Neutral, low-latency neural voice',
-    provider: 'elevenlabs',
-    language: 'English',
-    gender: 'Female',
-    previewText: ENGLISH_PREVIEW_TEXT,
-    previewLang: 'en-US',
-  },
 ];
 
 const CHATS_STORAGE_KEY = 'void_ai_chat_sessions_v1';
@@ -147,7 +161,12 @@ const SETTINGS_STORAGE_KEY = 'void_ai_user_settings_v1';
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   ttsVoice: 'flux-meena-en',
+  ttsModel: 'gpt-4o-mini-tts',
   ttsSpeed: 1.0,
+  sttModel: 'gemini',
+  embeddingModel: 'text-embedding-3-large',
+  moderationModel: 'omni-moderation-latest',
+  moderationEnabled: true,
   autoReadResponses: false,
   compactMode: false,
 };
@@ -201,18 +220,56 @@ export function loadUserSettings(): UserSettings {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return DEFAULT_USER_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<UserSettings>;
+    const validTtsModels: VoidAiTtsModel[] = [
+      'gpt-4o-mini-tts',
+      'tts-1-hd',
+      'tts-1',
+    ];
+    const validSttModels: TranscriptionModelId[] = [
+      'gemini',
+      'gpt-4o-transcribe',
+      'gpt-4o-mini-transcribe',
+      'whisper-1',
+    ];
+    const validEmbeddingModels: VoidAiEmbeddingModel[] = [
+      'text-embedding-3-large',
+      'text-embedding-3-small',
+    ];
+
     return {
       ttsVoice:
         typeof parsed.ttsVoice === 'string' &&
         AVAILABLE_TTS_VOICES.some((voice) => voice.id === parsed.ttsVoice)
           ? parsed.ttsVoice
           : DEFAULT_USER_SETTINGS.ttsVoice,
+      ttsModel:
+        typeof parsed.ttsModel === 'string' &&
+        validTtsModels.includes(parsed.ttsModel as VoidAiTtsModel)
+          ? (parsed.ttsModel as VoidAiTtsModel)
+          : DEFAULT_USER_SETTINGS.ttsModel,
       ttsSpeed:
         typeof parsed.ttsSpeed === 'number' &&
         parsed.ttsSpeed >= 0.7 &&
         parsed.ttsSpeed <= 1.5
           ? parsed.ttsSpeed
           : DEFAULT_USER_SETTINGS.ttsSpeed,
+      sttModel:
+        typeof parsed.sttModel === 'string' &&
+        validSttModels.includes(parsed.sttModel as TranscriptionModelId)
+          ? (parsed.sttModel as TranscriptionModelId)
+          : DEFAULT_USER_SETTINGS.sttModel,
+      embeddingModel:
+        typeof parsed.embeddingModel === 'string' &&
+        validEmbeddingModels.includes(
+          parsed.embeddingModel as VoidAiEmbeddingModel,
+        )
+          ? (parsed.embeddingModel as VoidAiEmbeddingModel)
+          : DEFAULT_USER_SETTINGS.embeddingModel,
+      moderationModel: 'omni-moderation-latest',
+      moderationEnabled:
+        typeof parsed.moderationEnabled === 'boolean'
+          ? parsed.moderationEnabled
+          : DEFAULT_USER_SETTINGS.moderationEnabled,
       autoReadResponses: Boolean(parsed.autoReadResponses),
       compactMode: Boolean(parsed.compactMode),
     };

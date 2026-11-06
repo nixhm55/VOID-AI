@@ -1,9 +1,19 @@
+import {
+  VOIDAI_OPENAI_STT_MODELS,
+  type VoidAiOpenAiSttModel,
+  resolveVoidAiApiKey,
+  resolveVoidAiBaseUrl,
+} from './config.js';
+
 /**
- * Ultra-Fast (<50ms) Trilingual Speech-to-Script Converter
- * Primary: English (en) | Direct Native Scripts: Malayalam (മലയാളം) & Hindi (हिन्दी)
+ * Ultra-Fast (<50ms) Trilingual Speech-to-Script Converter (Primary Engine)
+ * + VoidAI OpenAI Audio Transcription (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1`)
+ * Supports automatic language detection across Malayalam (മലയാളം), Hindi (हिन्दी), English, and more
+ * without forced translation into English.
  */
 
 const DISALLOWED_SCRIPT_REGEX =
+  // eslint-disable-next-line no-misleading-character-class
   /[^\u0020-\u007E\u00A0-\u00FF\u0900-\u097F\u0D00-\u0D7F\u200C\u200D\u2013-\u2026]+/g;
 
 export function collapseDuplicateSpeech(text: string): string {
@@ -119,18 +129,17 @@ const MALAYALAM_ROMAN_REGEX =
   /\b(?:njan|njaan|nyan|ente|enikku|enikk|ninakku|ninakk|ningal|ningalkku|ningalkk|evide|evideya|evideyanu|ivide|ivideya|ivideyanu|entha|enthu|enthokke|enthokkeyundu|engane|enganeya|enganeyanu|eppo|eppozha|kollam|adipoli|machane|mone|mwone|chetta|chechi|allyo|alle|allaa|aanu|alla|unde|undu|illa|varum|poyi|parayu|parayoo|cheyyu|cheyyoo|venam|venda|ariyamo|ariyilla|manassilayo|manasilayo|sukham|sukhamano|sugamano|sughamano|vishesham|paripadi|sahayam|namaskaram|kazhinju|samsarikkunna|kettille|ketto|shari|shariya|nerakku)\b/i;
 
 const HINDI_ROMAN_REGEX =
-  /\b(?:main|mein|mujhe|mera|meri|mere|tum|tumhara|aap|aapka|kya|kaise|kaisa|kaisi|kahan|kab|kyun|kyon|hai|hain|ho|hoon|tha|thi|the|nahi|nahin|haan|accha|achha|theek|thik|bhai|yaar|dost|madad|chahiye|karo|karna|karenge|batao|bataiye|dekho|suno|samajh|haal|mausam|kaam|naam|sab|kuch|bahut|abhi|aaj|kal)\b/i;
+  /\b(?:mein|mujhe|mera|meri|mere|tum|tumhara|aap|aapka|kya|kaise|kaisa|kaisi|kahan|kab|kyun|kyon|hai|hain|hoon|tha|thi|nahi|nahin|haan|accha|achha|theek|thik|bhai|yaar|dost|madad|chahiye|karo|karna|karenge|batao|bataiye|dekho|suno|samajh|haal|mausam|kaam|naam|sab|kuch|bahut|abhi|aaj|kal)\b/i;
 
 export function detectSpokenLanguage(
   hint: string,
   preferredLang = 'en',
 ): 'en' | 'ml' | 'hi' {
-  if (preferredLang === 'ml') return 'ml';
-  if (preferredLang === 'hi') return 'hi';
-
   const cleaned = hint.toLowerCase().trim();
   if (!cleaned) return 'en';
 
+  // Automatic spoken-language detection takes precedence so users never have to
+  // manually switch languages before speaking Malayalam, Hindi, or English!
   if (MALAYALAM_ROMAN_REGEX.test(cleaned)) return 'ml';
   if (HINDI_ROMAN_REGEX.test(cleaned)) return 'hi';
 
@@ -152,6 +161,9 @@ export function detectSpokenLanguage(
   ) {
     return 'ml';
   }
+
+  if (preferredLang === 'ml') return 'ml';
+  if (preferredLang === 'hi') return 'hi';
 
   return 'en';
 }
@@ -211,4 +223,148 @@ export async function convertSpokenHintFast(options: {
 
   const converted = await googleInputToolsTransliterate(text, targetLang);
   return collapseDuplicateSpeech(converted || text);
+}
+
+/**
+ * Returns the ordered OpenAI transcription model fallback chain:
+ * 1. `gpt-4o-transcribe` (Best-quality OpenAI option)
+ * 2. `gpt-4o-mini-transcribe` (First fallback)
+ * 3. `whisper-1` (Second fallback)
+ */
+export function getOpenAiTranscriptionFallbackChain(
+  preferredModel?: string,
+): VoidAiOpenAiSttModel[] {
+  const clean = String(preferredModel ?? '').trim() as VoidAiOpenAiSttModel;
+  if (VOIDAI_OPENAI_STT_MODELS.includes(clean)) {
+    const rest = VOIDAI_OPENAI_STT_MODELS.filter((m) => m !== clean);
+    return [clean, ...rest];
+  }
+  return [...VOIDAI_OPENAI_STT_MODELS];
+}
+
+export interface AudioTranscriptionRequest {
+  audioBytes: Uint8Array;
+  mimeType?: string;
+  fileName?: string;
+  preferredModel?: string;
+  language?: string;
+  voidAiBaseUrl?: string;
+  voidAiApiKey?: string;
+}
+
+export interface AudioTranscriptionResult {
+  text: string;
+  usedModel: VoidAiOpenAiSttModel;
+  fallbackUsed: boolean;
+}
+
+/**
+ * Transcribes spoken audio via VoidAI (`POST https://api.voidai.app/v1/audio/transcriptions`)
+ * with automatic fallback across:
+ * 1. `gpt-4o-transcribe`
+ * 2. `gpt-4o-mini-transcribe`
+ * 3. `whisper-1`
+ *
+ * Preserves the original spoken language (Malayalam, Hindi, English, etc.) without
+ * translating non-English speech into English.
+ */
+export async function transcribeAudioViaVoidAi(
+  options: AudioTranscriptionRequest,
+): Promise<AudioTranscriptionResult> {
+  const baseUrl = resolveVoidAiBaseUrl(options.voidAiBaseUrl);
+  const apiKey = resolveVoidAiApiKey(options.voidAiApiKey);
+
+  if (!apiKey) {
+    throw new Error(
+      'VOIDAI_API_KEY is not configured in the server environment (.env).',
+    );
+  }
+
+  if (!options.audioBytes || options.audioBytes.byteLength === 0) {
+    throw new Error('Audio payload is empty.');
+  }
+
+  const endpoint = `${baseUrl}/audio/transcriptions`;
+  const chain = getOpenAiTranscriptionFallbackChain(options.preferredModel);
+  const requestedFirst = chain[0];
+  const mimeType = options.mimeType || 'audio/webm';
+  const fileName =
+    options.fileName ||
+    (mimeType.includes('mp4')
+      ? 'speech.mp4'
+      : mimeType.includes('wav')
+        ? 'speech.wav'
+        : mimeType.includes('mpeg') || mimeType.includes('mp3')
+          ? 'speech.mp3'
+          : 'speech.webm');
+
+  // Optional language hint only when explicitly specified as 'ml' or 'hi';
+  // when unset or 'auto'/'en' (default), let the model auto-detect Malayalam, Hindi, or English!
+  const explicitIsoLang =
+    options.language === 'ml' || options.language === 'ml-in'
+      ? 'ml'
+      : options.language === 'hi' || options.language === 'hi-in'
+        ? 'hi'
+        : undefined;
+
+  let lastError = 'All VoidAI transcription models failed.';
+
+  for (const candidateModel of chain) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 18000);
+
+    try {
+      const formData = new FormData();
+      const blob = new Blob([options.audioBytes], { type: mimeType });
+      formData.append('file', blob, fileName);
+      formData.append('model', candidateModel);
+      formData.append('response_format', 'json');
+      // Prompt instructs the transcription engine to transcribe in the original spoken
+      // language/script (Malayalam മലയാളം, Hindi हिन्दी, or English) and never translate.
+      formData.append(
+        'prompt',
+        'Transcribe verbatim in the original spoken language and native script (English, മലയാളം, हिन्दी). Do not translate.',
+      );
+      if (explicitIsoLang) {
+        formData.append('language', explicitIsoLang);
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: formData,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        lastError = `VoidAI STT (${candidateModel}) HTTP ${res.status}: ${errText.slice(0, 200)}`;
+        continue;
+      }
+
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawText = String(data.text ?? '').trim();
+      const cleaned = collapseDuplicateSpeech(rawText);
+      if (cleaned) {
+        return {
+          text: cleaned,
+          usedModel: candidateModel,
+          fallbackUsed: candidateModel !== requestedFirst,
+        };
+      }
+      lastError = `VoidAI STT (${candidateModel}) returned empty transcript.`;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError =
+        err instanceof Error
+          ? err.message
+          : `VoidAI STT (${candidateModel}) failed`;
+    }
+  }
+
+  throw new Error(lastError);
 }

@@ -102,6 +102,24 @@ const DEFAULT_MODELS = [
 ];
 const DEFAULT_EFFORTS = ['Low', 'Medium', 'High', 'Extra', 'Max'];
 
+const OPENAI_STT_MODELS = new Set([
+  'gpt-4o-transcribe',
+  'gpt-4o-mini-transcribe',
+  'whisper-1'
+]);
+
+const blobToBase64 = blob =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = String(reader.result ?? '');
+      const idx = result.indexOf(',');
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
 const mix = (a, b, t) => a + (b - a) * t;
 const pathAt = (a, b, t) => {
   let d = '';
@@ -190,6 +208,7 @@ export default function PromptBar({
   squash = 0.12,
   tilt = 8,
   pressScale = 0.96,
+  sttModel = 'gemini',
   className = ''
 }) {
   const reduce = useReducedMotion();
@@ -204,6 +223,9 @@ export default function PromptBar({
   const lastOpen = useRef(null);
   const dictation = useRef(0);
   const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const baseDraftRef = useRef('');
   const committedSegmentsRef = useRef([]);
   const currentInterimDisplayRef = useRef('');
@@ -322,7 +344,7 @@ export default function PromptBar({
       const promise = authenticatedFetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hint: phrase, lang: apiLang })
+        body: JSON.stringify({ hint: phrase, lang: apiLang, model: sttModel })
       })
         .then(res => (res.ok ? res.json() : null))
         .then(data => {
@@ -343,8 +365,107 @@ export default function PromptBar({
       pendingConversionsRef.current.push(promise);
       return promise;
     },
-    [syncDraftFromSpeechState]
+    [sttModel, syncDraftFromSpeechState]
   );
+
+  const stopMediaRecorder = useCallback(
+    flushAudio => {
+      const recorder = mediaRecorderRef.current;
+      mediaRecorderRef.current = null;
+      const stream = mediaStreamRef.current;
+      mediaStreamRef.current = null;
+
+      if (!recorder) {
+        if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+        }
+        audioChunksRef.current = [];
+        return;
+      }
+
+      const mimeType = recorder.mimeType || 'audio/webm';
+      const finishRecording = () => {
+        if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+        }
+        const chunks = [...audioChunksRef.current];
+        audioChunksRef.current = [];
+        if (!flushAudio || chunks.length === 0 || !OPENAI_STT_MODELS.has(sttModel)) {
+          return;
+        }
+        const blob = new Blob(chunks, { type: mimeType });
+        if (blob.size < 200) return;
+
+        const fallbackHint = collapseRepeatedSpeech(
+          committedSegmentsRef.current.filter(Boolean).join(' ')
+        );
+        const promise = blobToBase64(blob)
+          .then(audioBase64 =>
+            authenticatedFetch('/api/transcribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audioBase64,
+                mimeType,
+                model: sttModel,
+                hint: fallbackHint
+              })
+            })
+          )
+          .then(res => (res.ok ? res.json() : null))
+          .then(data => {
+            const transcribed = cleanSpeechTranscript(data?.text);
+            if (transcribed) {
+              committedSegmentsRef.current = [transcribed];
+              currentInterimDisplayRef.current = '';
+              syncDraftFromSpeechState();
+            }
+          })
+          .catch(() => {});
+
+        pendingConversionsRef.current.push(promise);
+      };
+
+      if (recorder.state !== 'inactive') {
+        recorder.onstop = finishRecording;
+        try {
+          recorder.stop();
+        } catch {
+          finishRecording();
+        }
+      } else {
+        finishRecording();
+      }
+    },
+    [sttModel, syncDraftFromSpeechState]
+  );
+
+  const startMediaRecorderIfSelected = useCallback(async () => {
+    if (!OPENAI_STT_MODELS.has(sttModel)) return false;
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      return false;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = e => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+      recorder.start(250);
+      mediaRecorderRef.current = recorder;
+      return true;
+    } catch {
+      return false;
+    }
+  }, [sttModel]);
 
   const stopRecognition = useCallback(
     (flushInterim = false) => {
@@ -357,6 +478,7 @@ export default function PromptBar({
         } catch {}
         recognitionRef.current = null;
       }
+      stopMediaRecorder(flushInterim);
       setListening(false);
       if (flushInterim && latestRawInterimRef.current.trim()) {
         const leftover = latestRawInterimRef.current;
@@ -368,7 +490,7 @@ export default function PromptBar({
         currentInterimDisplayRef.current = '';
       }
     },
-    [convertAndCommitPhrase, speechLang]
+    [convertAndCommitPhrase, speechLang, stopMediaRecorder]
   );
 
   useLayoutEffect(() => {
@@ -669,7 +791,7 @@ export default function PromptBar({
             void authenticatedFetch('/api/transcribe', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ hint: cleanedInterim, lang: apiLang })
+              body: JSON.stringify({ hint: cleanedInterim, lang: apiLang, model: sttModel })
             })
               .then(r => (r.ok ? r.json() : null))
               .then(data => {
@@ -721,7 +843,7 @@ export default function PromptBar({
         return false;
       }
     },
-    [convertAndCommitPhrase, syncDraftFromSpeechState]
+    [convertAndCommitPhrase, sttModel, syncDraftFromSpeechState]
   );
 
   const toggleListen = () => {
@@ -744,6 +866,7 @@ export default function PromptBar({
       pendingConversionsRef.current = [];
       shouldKeepListeningRef.current = true;
       setListening(true);
+      void startMediaRecorderIfSelected();
       const started = startBrowserRecognition(speechLang);
       if (!started) {
         shouldKeepListeningRef.current = false;
@@ -755,6 +878,7 @@ export default function PromptBar({
 
     const seq = ++dictation.current;
     setListening(true);
+    void startMediaRecorderIfSelected();
     Promise.resolve(latest.current.onDictate?.()).then(
       text => {
         if (seq !== dictation.current) return;
