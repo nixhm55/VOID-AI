@@ -14,6 +14,7 @@ import {
   type VoidAiEmbeddingModel,
   type VoidAiTtsModel,
 } from '../lib/tools/config';
+import { isOpenAiTtsVoice } from '../lib/tools/text_to_speech';
 import { authenticatedFetch } from '../lib/api-fetch';
 
 interface SettingsModalProps {
@@ -206,6 +207,17 @@ export default function SettingsModal({
   }, [voiceView, gptGenderFilter, query]);
 
   if (!open) return null;
+
+  const handleSelectTtsModel = (modelId: VoidAiTtsModel) => {
+    const nextVoice = isOpenAiTtsVoice(settings.ttsVoice)
+      ? settings.ttsVoice
+      : 'coral';
+    onUpdateSettings({
+      ...settings,
+      ttsModel: modelId,
+      ttsVoice: nextVoice,
+    });
+  };
 
   const handlePreviewVoice = async (voice: VoiceOption) => {
     if (previewAudioRef.current) {
@@ -596,10 +608,7 @@ export default function SettingsModal({
                           key={m.id}
                           type="button"
                           onClick={() =>
-                            onUpdateSettings({
-                              ...settings,
-                              ttsModel: m.id as VoidAiTtsModel,
-                            })
+                            handleSelectTtsModel(m.id as VoidAiTtsModel)
                           }
                           className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
                             active
@@ -750,10 +759,7 @@ export default function SettingsModal({
                                 key={m.id}
                                 type="button"
                                 onClick={() =>
-                                  onUpdateSettings({
-                                    ...settings,
-                                    ttsModel: m.id as VoidAiTtsModel,
-                                  })
+                                  handleSelectTtsModel(m.id as VoidAiTtsModel)
                                 }
                                 className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   active
@@ -924,7 +930,7 @@ export default function SettingsModal({
                           </p>
                         </div>
                         <span className="font-mono text-[11px] text-[#a1a1aa]">
-                          {m.dimensions}d
+                          {m.dimensions}d · {active ? 'Selected' : 'Auto-fallback'}
                         </span>
                       </button>
                     );
@@ -950,10 +956,7 @@ export default function SettingsModal({
                         key={m.id}
                         type="button"
                         onClick={() =>
-                          onUpdateSettings({
-                            ...settings,
-                            ttsModel: m.id as VoidAiTtsModel,
-                          })
+                          handleSelectTtsModel(m.id as VoidAiTtsModel)
                         }
                         className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
                           active
@@ -1022,7 +1025,7 @@ export default function SettingsModal({
                           </p>
                         </div>
                         <span className="text-[11px] text-[#a1a1aa]">
-                          {active ? 'Selected' : 'Available'}
+                          {active ? 'Selected' : 'Auto-fallback'}
                         </span>
                       </button>
                     );

@@ -42,15 +42,29 @@ async function toWebRequest(
 
   let body: BodyInit | undefined;
   if (method !== 'GET' && method !== 'HEAD') {
-    if (req.body !== undefined) {
-      body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    if (req.body !== undefined && req.body !== null) {
+      if (typeof req.body === 'string') {
+        body = req.body;
+      } else if (Buffer.isBuffer(req.body) || req.body instanceof Uint8Array) {
+        body = new Uint8Array(req.body);
+      } else {
+        body = JSON.stringify(req.body);
+      }
+      // Remove original content-length / transfer-encoding so Fetch Request
+      // computes the exact byte length of the serialized body on Vercel.
+      headers.delete('content-length');
+      headers.delete('transfer-encoding');
     } else {
       const chunks: Buffer[] = [];
       for await (const chunk of req) {
         if (abortController.signal.aborted) break;
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
-      if (chunks.length > 0) body = new Uint8Array(Buffer.concat(chunks));
+      if (chunks.length > 0) {
+        body = new Uint8Array(Buffer.concat(chunks));
+        headers.delete('content-length');
+        headers.delete('transfer-encoding');
+      }
     }
   }
 

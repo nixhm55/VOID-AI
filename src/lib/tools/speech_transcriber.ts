@@ -287,16 +287,21 @@ export async function transcribeAudioViaVoidAi(
   const endpoint = `${baseUrl}/audio/transcriptions`;
   const chain = getOpenAiTranscriptionFallbackChain(options.preferredModel);
   const requestedFirst = chain[0];
-  const mimeType = options.mimeType || 'audio/webm';
+  // Strip codec parameters like `;codecs=opus` because OpenAI / VoidAI multipart
+  // parser requires clean MIME types (`audio/webm`, `audio/mp4`, `audio/wav`, `audio/mpeg`).
+  const cleanMimeType =
+    (options.mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
   const fileName =
     options.fileName ||
-    (mimeType.includes('mp4')
+    (cleanMimeType.includes('mp4') || cleanMimeType.includes('m4a')
       ? 'speech.mp4'
-      : mimeType.includes('wav')
+      : cleanMimeType.includes('wav')
         ? 'speech.wav'
-        : mimeType.includes('mpeg') || mimeType.includes('mp3')
+        : cleanMimeType.includes('mpeg') || cleanMimeType.includes('mp3')
           ? 'speech.mp3'
-          : 'speech.webm');
+          : cleanMimeType.includes('ogg')
+            ? 'speech.ogg'
+            : 'speech.webm');
 
   // Optional language hint only when explicitly specified as 'ml' or 'hi';
   // when unset or 'auto'/'en' (default), let the model auto-detect Malayalam, Hindi, or English!
@@ -315,7 +320,7 @@ export async function transcribeAudioViaVoidAi(
 
     try {
       const formData = new FormData();
-      const blob = new Blob([options.audioBytes], { type: mimeType });
+      const blob = new Blob([options.audioBytes], { type: cleanMimeType });
       formData.append('file', blob, fileName);
       formData.append('model', candidateModel);
       formData.append('response_format', 'json');

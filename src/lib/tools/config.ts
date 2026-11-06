@@ -161,32 +161,72 @@ export const AI_MODELS = [
   'liquid/lfm2.5-2.6b:free',
 ];
 
+function cleanEnvValue(val?: string): string {
+  if (!val) return '';
+  return val
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+}
+
 export function resolveOmniBaseUrl(customBaseUrl?: string): string {
   const raw =
-    customBaseUrl ||
-    (typeof process !== 'undefined' ? process.env?.OMNI_BASE_URL : '') ||
+    cleanEnvValue(customBaseUrl) ||
+    cleanEnvValue(
+      typeof process !== 'undefined'
+        ? (process.env?.OMNI_BASE_URL ?? process.env?.VITE_OMNI_BASE_URL)
+        : '',
+    ) ||
     DEFAULT_OMNI_BASE_URL;
-  return raw.replace(/\/+$/, '');
+  const trimmed = raw.replace(/\/+$/, '');
+  if (
+    trimmed.includes('omniroute-server') &&
+    !trimmed.endsWith('/v1')
+  ) {
+    return `${trimmed}/v1`;
+  }
+  return trimmed;
 }
 
 export function resolveVoidAiBaseUrl(customBaseUrl?: string): string {
   const raw =
-    customBaseUrl ||
-    (typeof process !== 'undefined' ? process.env?.VOIDAI_BASE_URL : '') ||
+    cleanEnvValue(customBaseUrl) ||
+    cleanEnvValue(
+      typeof process !== 'undefined'
+        ? (process.env?.VOIDAI_BASE_URL ??
+            process.env?.VITE_VOIDAI_BASE_URL ??
+            process.env?.VOID_BASE_URL)
+        : '',
+    ) ||
     DEFAULT_VOIDAI_BASE_URL;
-  return raw.replace(/\/+$/, '');
+  const trimmed = raw.replace(/\/+$/, '');
+  // If user configured https://api.voidai.app without /v1, normalize to /v1
+  if (
+    /^https?:\/\/(?:api\.)?voidai\.app$/i.test(trimmed)
+  ) {
+    return 'https://api.voidai.app/v1';
+  }
+  return trimmed;
 }
 
 /**
  * Loads the VoidAI Unified API key strictly from environment variables (`VOIDAI_API_KEY`).
- * Never hardcoded in frontend or backend source files.
+ * Supports common Vercel env aliases (`VOIDAI_API_KEY`, `VITE_VOIDAI_API_KEY`, `VOID_API_KEY`)
+ * and strips accidental quotes or `Bearer ` prefixes. Never hardcoded in source files.
  */
 export function resolveVoidAiApiKey(customKey?: string): string {
-  const raw =
-    customKey ||
-    (typeof process !== 'undefined' ? process.env?.VOIDAI_API_KEY : '') ||
-    '';
-  return raw.trim();
+  return (
+    cleanEnvValue(customKey) ||
+    cleanEnvValue(
+      typeof process !== 'undefined'
+        ? (process.env?.VOIDAI_API_KEY ??
+            process.env?.VITE_VOIDAI_API_KEY ??
+            process.env?.VOID_API_KEY ??
+            process.env?.VOIDAI_KEY)
+        : '',
+    )
+  );
 }
 
 /**
@@ -206,23 +246,34 @@ export function resolveDeepgramVoiceModel(voiceId?: string): string | null {
  * DEEPGRAM_API_KEY in .env.local. There is deliberately no hardcoded fallback.
  */
 export function resolveDeepgramApiKey(customKey?: string): string {
-  const raw =
-    customKey ||
-    (typeof process !== 'undefined' ? process.env?.DEEPGRAM_API_KEY : '') ||
-    '';
-  return raw.trim();
+  return (
+    cleanEnvValue(customKey) ||
+    cleanEnvValue(
+      typeof process !== 'undefined' ? process.env?.DEEPGRAM_API_KEY : '',
+    )
+  );
 }
 
 export function resolveOmniApiKeys(customKeys?: string[]): string[] {
   if (customKeys && customKeys.length > 0) {
-    return customKeys.filter((k): k is string => Boolean(k && k.trim()));
+    return customKeys
+      .map((k) => cleanEnvValue(k))
+      .filter((k): k is string => Boolean(k));
   }
   const envKey1 =
-    typeof process !== 'undefined' ? process.env?.OMNI_API_KEY_1 : undefined;
+    typeof process !== 'undefined'
+      ? cleanEnvValue(
+          process.env?.OMNI_API_KEY_1 ??
+            process.env?.OMNI_API_KEY ??
+            process.env?.VITE_OMNI_API_KEY_1,
+        )
+      : '';
   const envKey2 =
-    typeof process !== 'undefined' ? process.env?.OMNI_API_KEY_2 : undefined;
+    typeof process !== 'undefined'
+      ? cleanEnvValue(
+          process.env?.OMNI_API_KEY_2 ?? process.env?.VITE_OMNI_API_KEY_2,
+        )
+      : '';
 
-  return [envKey1, envKey2].filter(
-    (k): k is string => Boolean(k && k.trim()),
-  );
+  return [envKey1, envKey2].filter((k): k is string => Boolean(k));
 }

@@ -72,7 +72,7 @@ const MALAYALAM_ROMAN_CUE_REGEX =
   /\b(?:njan|njaan|nyan|ente|enikku|enikk|ninakku|ninakk|ningal|ningalkku|evide|evideya|evideyanu|ivide|ivideya|ivideyanu|entha|enthu|enthokke|enthokkeyundu|engane|enganeya|enganeyanu|eppo|kollam|adipoli|machane|mone|chetta|chechi|aanu|alla|unde|undu|illa|varum|poyi|parayu|cheyyu|venam|venda|ariyamo|ariyilla|manassilayo|manasilayo|sukham|sukhamano|sugamano|sughamano|sugar\s*mono|vishesham|paripadi|sahayam|namaskaram|kazhinju)\b/i;
 
 const HINDI_ROMAN_CUE_REGEX =
-  /\b(?:main|mein|mujhe|mera|meri|mere|tum|tumhara|aap|aapka|kya|kaise|kaisa|kaisi|kahan|kab|kyun|kyon|hai|hain|hoon|nahi|nahin|haan|accha|achha|theek|thik|bhai|yaar|madad|chahiye|karo|karna|batao|bataiye|dekho|suno|samajh|haal|mausam)\b/i;
+  /\b(?:mein|mujhe|mera|meri|mere|tum|tumhara|aap|aapka|kya|kaise|kaisa|kaisi|kahan|kab|kyun|kyon|hai|hain|hoon|nahi|nahin|haan|accha|achha|theek|thik|bhai|yaar|madad|chahiye|karo|karna|batao|bataiye|dekho|suno|samajh|haal|mausam)\b/i;
 
 const DEFAULT_SOURCES = [
   {
@@ -101,12 +101,6 @@ const DEFAULT_MODELS = [
   { key: 'mirash', name: 'MIRASH', shortName: 'MIRASH', tag: '' }
 ];
 const DEFAULT_EFFORTS = ['Low', 'Medium', 'High', 'Extra', 'Max'];
-
-const OPENAI_STT_MODELS = new Set([
-  'gpt-4o-transcribe',
-  'gpt-4o-mini-transcribe',
-  'whisper-1'
-]);
 
 const blobToBase64 = blob =>
   new Promise((resolve, reject) => {
@@ -327,7 +321,7 @@ export default function PromptBar({
         MALAYALAM_ROMAN_CUE_REGEX.test(phrase) ||
         HINDI_ROMAN_CUE_REGEX.test(phrase);
 
-      // If standard English in primary EN mode, commit directly in 0ms!
+      // If standard English in primary EN mode, commit directly in 0ms for instant auto-dictation!
       if (!needsIndicScript) {
         const lastSeg = committedSegmentsRef.current[committedSegmentsRef.current.length - 1];
         if (!lastSeg || lastSeg.toLowerCase() !== phrase.toLowerCase()) {
@@ -338,8 +332,7 @@ export default function PromptBar({
         return Promise.resolve();
       }
 
-      // IMPORTANT: Do NOT push raw Manglish/Hinglish into committedSegmentsRef first!
-      // Convert directly (~40ms via Google Input Tools) and only push the native script!
+      // Convert Manglish/Hinglish via /api/transcribe and push the native script
       const apiLang = langCode === 'ml-IN' ? 'ml' : langCode === 'hi-IN' ? 'hi' : 'en';
       const promise = authenticatedFetch('/api/transcribe', {
         method: 'POST',
@@ -380,68 +373,78 @@ export default function PromptBar({
           stream.getTracks().forEach(t => t.stop());
         }
         audioChunksRef.current = [];
-        return;
+        return Promise.resolve();
       }
 
-      const mimeType = recorder.mimeType || 'audio/webm';
-      const finishRecording = () => {
-        if (stream) {
-          stream.getTracks().forEach(t => t.stop());
-        }
-        const chunks = [...audioChunksRef.current];
-        audioChunksRef.current = [];
-        if (!flushAudio || chunks.length === 0 || !OPENAI_STT_MODELS.has(sttModel)) {
-          return;
-        }
-        const blob = new Blob(chunks, { type: mimeType });
-        if (blob.size < 200) return;
+      const cleanMime = (recorder.mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
 
-        const fallbackHint = collapseRepeatedSpeech(
-          committedSegmentsRef.current.filter(Boolean).join(' ')
-        );
-        const promise = blobToBase64(blob)
-          .then(audioBase64 =>
-            authenticatedFetch('/api/transcribe', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                audioBase64,
-                mimeType,
-                model: sttModel,
-                hint: fallbackHint
+      const stopPromise = new Promise(resolve => {
+        const finishRecording = () => {
+          if (stream) {
+            stream.getTracks().forEach(t => t.stop());
+          }
+          const chunks = [...audioChunksRef.current];
+          audioChunksRef.current = [];
+          if (!flushAudio || chunks.length === 0) {
+            resolve();
+            return;
+          }
+          const blob = new Blob(chunks, { type: cleanMime });
+          if (blob.size < 200) {
+            resolve();
+            return;
+          }
+
+          const fallbackHint = collapseRepeatedSpeech(
+            committedSegmentsRef.current.filter(Boolean).join(' ')
+          );
+          const apiLang = speechLang === 'ml-IN' ? 'ml' : speechLang === 'hi-IN' ? 'hi' : 'auto';
+          blobToBase64(blob)
+            .then(audioBase64 =>
+              authenticatedFetch('/api/transcribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audioBase64,
+                  mimeType: cleanMime,
+                  model: sttModel === 'gemini' ? 'gpt-4o-transcribe' : sttModel,
+                  lang: apiLang,
+                  hint: fallbackHint
+                })
               })
+            )
+            .then(res => (res.ok ? res.json() : null))
+            .then(data => {
+              const transcribed = cleanSpeechTranscript(data?.text);
+              if (transcribed && committedSegmentsRef.current.length === 0) {
+                committedSegmentsRef.current = [transcribed];
+                currentInterimDisplayRef.current = '';
+                syncDraftFromSpeechState();
+              }
             })
-          )
-          .then(res => (res.ok ? res.json() : null))
-          .then(data => {
-            const transcribed = cleanSpeechTranscript(data?.text);
-            if (transcribed) {
-              committedSegmentsRef.current = [transcribed];
-              currentInterimDisplayRef.current = '';
-              syncDraftFromSpeechState();
-            }
-          })
-          .catch(() => {});
+            .catch(() => {})
+            .finally(() => resolve());
+        };
 
-        pendingConversionsRef.current.push(promise);
-      };
-
-      if (recorder.state !== 'inactive') {
-        recorder.onstop = finishRecording;
-        try {
-          recorder.stop();
-        } catch {
+        if (recorder.state !== 'inactive') {
+          recorder.onstop = finishRecording;
+          try {
+            recorder.stop();
+          } catch {
+            finishRecording();
+          }
+        } else {
           finishRecording();
         }
-      } else {
-        finishRecording();
-      }
+      });
+
+      pendingConversionsRef.current.push(stopPromise);
+      return stopPromise;
     },
-    [sttModel, syncDraftFromSpeechState]
+    [speechLang, sttModel, syncDraftFromSpeechState]
   );
 
-  const startMediaRecorderIfSelected = useCallback(async () => {
-    if (!OPENAI_STT_MODELS.has(sttModel)) return false;
+  const startMediaRecorderFallback = useCallback(async () => {
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices?.getUserMedia ||
@@ -465,7 +468,7 @@ export default function PromptBar({
     } catch {
       return false;
     }
-  }, [sttModel]);
+  }, []);
 
   const stopRecognition = useCallback(
     (flushInterim = false) => {
@@ -478,7 +481,7 @@ export default function PromptBar({
         } catch {}
         recognitionRef.current = null;
       }
-      stopMediaRecorder(flushInterim);
+      void stopMediaRecorder(flushInterim);
       setListening(false);
       if (flushInterim && latestRawInterimRef.current.trim()) {
         const leftover = latestRawInterimRef.current;
@@ -703,7 +706,7 @@ export default function PromptBar({
       pendingConversionsRef.current = [];
       await Promise.race([
         Promise.allSettled(pending),
-        new Promise(r => setTimeout(r, 800))
+        new Promise(r => setTimeout(r, 1500))
       ]);
     }
     const finalToSend = collapseRepeatedSpeech(
@@ -785,7 +788,9 @@ export default function PromptBar({
             currentInterimDisplayRef.current = cleanedInterim;
             syncDraftFromSpeechState();
           } else {
-            // Convert interim Manglish/Hinglish live in ~40ms BEFORE displaying so raw Manglish never flashes!
+            // Show interim immediately AND convert Manglish/Hinglish live in ~40ms!
+            currentInterimDisplayRef.current = cleanedInterim;
+            syncDraftFromSpeechState();
             const seq = ++interimConvertSeqRef.current;
             const apiLang = langCode === 'ml-IN' ? 'ml' : langCode === 'hi-IN' ? 'hi' : 'en';
             void authenticatedFetch('/api/transcribe', {
@@ -853,44 +858,50 @@ export default function PromptBar({
       return;
     }
 
+    baseDraftRef.current = draft.trimEnd();
+    committedSegmentsRef.current = [];
+    currentInterimDisplayRef.current = '';
+    latestRawInterimRef.current = '';
+    lastCommittedRawRef.current = '';
+    lastCommittedTimeRef.current = 0;
+    pendingConversionsRef.current = [];
+
     const SpeechRecognition =
       typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
 
+    // Do NOT call getUserMedia (MediaRecorder) simultaneously with webkitSpeechRecognition
+    // so live browser auto-dictation never loses the microphone stream!
     if (SpeechRecognition) {
-      baseDraftRef.current = draft.trimEnd();
-      committedSegmentsRef.current = [];
-      currentInterimDisplayRef.current = '';
-      latestRawInterimRef.current = '';
-      lastCommittedRawRef.current = '';
-      lastCommittedTimeRef.current = 0;
-      pendingConversionsRef.current = [];
       shouldKeepListeningRef.current = true;
       setListening(true);
-      void startMediaRecorderIfSelected();
       const started = startBrowserRecognition(speechLang);
-      if (!started) {
-        shouldKeepListeningRef.current = false;
-        setListening(false);
+      if (started) {
+        focusInput();
+        return;
       }
-      focusInput();
-      return;
+      shouldKeepListeningRef.current = false;
     }
 
-    const seq = ++dictation.current;
+    // Fallback when SpeechRecognition is unavailable: record audio and transcribe via VoidAI STT
     setListening(true);
-    void startMediaRecorderIfSelected();
-    Promise.resolve(latest.current.onDictate?.()).then(
-      text => {
-        if (seq !== dictation.current) return;
-        setListening(false);
-        const cleaned = cleanSpeechTranscript(text);
-        if (cleaned) setDraft(d => (d.trim() ? `${d.trimEnd()} ${cleaned}` : cleaned));
-        focusInput();
-      },
-      () => {
-        if (seq === dictation.current) setListening(false);
+    void startMediaRecorderFallback().then(started => {
+      if (!started) {
+        const seq = ++dictation.current;
+        Promise.resolve(latest.current.onDictate?.()).then(
+          text => {
+            if (seq !== dictation.current) return;
+            setListening(false);
+            const cleaned = cleanSpeechTranscript(text);
+            if (cleaned) setDraft(d => (d.trim() ? `${d.trimEnd()} ${cleaned}` : cleaned));
+            focusInput();
+          },
+          () => {
+            if (seq === dictation.current) setListening(false);
+          }
+        );
       }
-    );
+    });
+    focusInput();
   };
 
   const cycleSpeechLang = () => {

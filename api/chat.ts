@@ -6,7 +6,9 @@ import {
   runOmniRouteAgentStream,
 } from '../src/lib/omniroute-agent.js';
 import {
+  type VoidAiEmbeddingModel,
   buildModerationPayloadInput,
+  createEmbeddingsViaVoidAi,
   moderateContentViaVoidAi,
 } from '../src/lib/tools/index.js';
 import {
@@ -21,6 +23,7 @@ interface ChatRequestBody {
   messages?: Array<{ role?: string; content?: string }>;
   model?: string;
   effort?: string;
+  embeddingModel?: VoidAiEmbeddingModel;
   moderationEnabled?: boolean;
   imageUrls?: string[];
 }
@@ -37,47 +40,60 @@ async function post(req: Request): Promise<Response> {
       );
     }
 
-    // Safe pre-moderation check via `omni-moderation-latest` when enabled (default: true).
-    // Fails open if the gateway disables public moderation so ordinary user content is never blocked.
-    if (body.moderationEnabled !== false) {
-      const lastUserMessage = [...rawMessages]
-        .reverse()
-        .find((m) => m && m.role === 'user' && m.content);
-      const userText = String(lastUserMessage?.content ?? '').trim();
+    const lastUserMessage = [...rawMessages]
+      .reverse()
+      .find((m) => m && m.role === 'user' && m.content);
+    const userText = String(lastUserMessage?.content ?? '').trim();
 
-      if (userText || (body.imageUrls && body.imageUrls.length > 0)) {
-        const modInput = buildModerationPayloadInput({
-          text: userText,
-          imageUrls: body.imageUrls,
-        });
-        const modResult = await moderateContentViaVoidAi({
-          input: modInput,
-        }).catch(() => null);
+    // Run VoidAI Moderation (`omni-moderation-latest`) and VoidAI Memory Embeddings
+    // (`text-embedding-3-large` -> `text-embedding-3-small`) in parallel so every
+    // conversation turn utilizes the configured VoidAI specialized pipeline without
+    // blocking or failing chat if an upstream route is unavailable.
+    const moderationPromise =
+      body.moderationEnabled !== false &&
+      (userText || (body.imageUrls && body.imageUrls.length > 0))
+        ? moderateContentViaVoidAi({
+            input: buildModerationPayloadInput({
+              text: userText,
+              imageUrls: body.imageUrls,
+            }),
+          }).catch(() => null)
+        : Promise.resolve(null);
 
-        if (modResult?.flagged) {
-          const encoder = new TextEncoder();
-          const flaggedStream = new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(
-                encoder.encode(
-                  formatSseDataFrame(
-                    'This request was flagged by the safety moderation filter (`omni-moderation-latest`) and could not be processed.',
-                  ),
-                ),
-              );
-              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-              controller.close();
-            },
-          });
-          return new Response(flaggedStream, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'private, no-store',
-            },
-          });
-        }
-      }
+    const embeddingPromise = userText
+      ? createEmbeddingsViaVoidAi({
+          input: userText,
+          model: body.embeddingModel || 'text-embedding-3-large',
+        }).catch(() => null)
+      : Promise.resolve(null);
+
+    const [modResult] = await Promise.all([
+      moderationPromise,
+      embeddingPromise,
+    ]);
+
+    if (modResult?.flagged) {
+      const encoder = new TextEncoder();
+      const flaggedStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              formatSseDataFrame(
+                'This request was flagged by the safety moderation filter (`omni-moderation-latest`) and could not be processed.',
+              ),
+            ),
+          );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(flaggedStream, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'private, no-store',
+        },
+      });
     }
 
     const result = await runOmniRouteAgentStream({

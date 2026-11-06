@@ -8,6 +8,7 @@ interface AiMessageProps {
   ttsVoice?: string;
   ttsModel?: string;
   ttsSpeed?: number;
+  autoRead?: boolean;
 }
 
 interface CodeBlockProps {
@@ -291,15 +292,18 @@ function renderTextBlocks(segment: string, blockKeyPrefix: string): ReactNode[] 
 export default function AiMessage({
   text,
   isStreaming = false,
-  ttsVoice = 'flux-meena-en',
+  ttsVoice = 'coral',
   ttsModel = 'gpt-4o-mini-tts',
   ttsSpeed = 1.0,
+  autoRead = false,
 }: AiMessageProps) {
   const [copiedAll, setCopiedAll] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playbackIdRef = useRef(0);
   const objectUrlsRef = useRef<string[]>([]);
+  const wasStreamingRef = useRef(isStreaming);
+  const hasAutoReadRef = useRef(false);
 
   const stopSpeech = () => {
     playbackIdRef.current += 1;
@@ -451,6 +455,25 @@ export default function AiMessage({
       }
     }
   };
+
+  useEffect(() => {
+    if (isStreaming) {
+      wasStreamingRef.current = true;
+      return;
+    }
+    if (
+      wasStreamingRef.current &&
+      !isStreaming &&
+      autoRead &&
+      !hasAutoReadRef.current &&
+      text.trim().length > 0
+    ) {
+      wasStreamingRef.current = false;
+      hasAutoReadRef.current = true;
+      void toggleSpeak();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStreaming, autoRead, text]);
 
   // Split by fenced code blocks ```lang ... ```
   const blocks: ReactNode[] = [];

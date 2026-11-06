@@ -23,6 +23,7 @@ import {
   saveChatSessions,
   saveUserSettings,
 } from './lib/chat-storage';
+import { addSemanticMemory } from './lib/memory-storage';
 import {
   deleteAllChatHistory,
   deleteChatHistoryItem,
@@ -197,8 +198,6 @@ export default function App() {
           if (!active || historyUserId.current !== authUser.id) return;
           setSessions((current) => {
             const merged = mergeChatHistory(remoteSessions, current);
-            // A deleted conversation is absent remotely and is removed from the
-            // local cache by the delete handlers below.
             return merged.filter((session) =>
               remoteSessions.some((remote) => remote.id === session.id) ||
               persistedHashes.current[session.id] !== sessionFingerprint(session),
@@ -364,6 +363,14 @@ export default function App() {
       return;
     }
 
+    // Store semantic memory vector in the dimension-partitioned store (`3072d` or `1536d`)
+    if (text.trim().length > 0) {
+      void addSemanticMemory({
+        text,
+        preferredModel: settings.embeddingModel,
+      }).catch(() => {});
+    }
+
     const aiMsgId = createClientId();
     const historyPayload: StreamChatMessage[] = [...existingMessages, userMsg]
       .filter((m) => m.text.trim().length > 0)
@@ -389,6 +396,7 @@ export default function App() {
         messages: historyPayload,
         model: model?.key || 'void-combo',
         effort: effectiveEffort,
+        embeddingModel: settings.embeddingModel,
         moderationEnabled: settings.moderationEnabled,
         signal: controller.current.signal,
         onChunk: (_delta, fullText) => {
@@ -575,6 +583,7 @@ export default function App() {
                   ttsVoice={settings.ttsVoice}
                   ttsModel={settings.ttsModel}
                   ttsSpeed={settings.ttsSpeed}
+                  autoRead={settings.autoReadResponses}
                 />
               ),
             )}

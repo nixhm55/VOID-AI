@@ -4,6 +4,7 @@ import {
   normalizeVoidIdentity,
 } from './omniroute-agent';
 import { authenticatedFetch } from './api-fetch';
+import type { VoidAiEmbeddingModel } from './tools/config';
 
 export { normalizeVoidIdentity };
 
@@ -16,6 +17,7 @@ export interface StreamChatOptions {
   messages: StreamChatMessage[];
   model?: string;
   effort?: string;
+  embeddingModel?: VoidAiEmbeddingModel;
   moderationEnabled?: boolean;
   signal?: AbortSignal;
   onChunk: (deltaText: string, fullText: string) => void;
@@ -25,6 +27,7 @@ export async function streamChatCompletion({
   messages,
   model = 'void-combo',
   effort = 'High',
+  embeddingModel = 'text-embedding-3-large',
   moderationEnabled = true,
   signal,
   onChunk,
@@ -61,6 +64,7 @@ export async function streamChatCompletion({
       messages,
       model: model || 'void-combo',
       effort: effort || 'High',
+      embeddingModel,
       moderationEnabled,
     }),
     signal,

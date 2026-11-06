@@ -160,7 +160,7 @@ const userChatsStorageKey = (userId: string) =>
 const SETTINGS_STORAGE_KEY = 'void_ai_user_settings_v1';
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
-  ttsVoice: 'flux-meena-en',
+  ttsVoice: 'coral',
   ttsModel: 'gpt-4o-mini-tts',
   ttsSpeed: 1.0,
   sttModel: 'gemini',
@@ -236,12 +236,16 @@ export function loadUserSettings(): UserSettings {
       'text-embedding-3-small',
     ];
 
+    // Migrate old default `flux-meena-en` to `coral` so VoidAI GPT Speech works immediately
+    const resolvedVoice =
+      typeof parsed.ttsVoice === 'string' &&
+      parsed.ttsVoice !== 'flux-meena-en' &&
+      AVAILABLE_TTS_VOICES.some((voice) => voice.id === parsed.ttsVoice)
+        ? parsed.ttsVoice
+        : DEFAULT_USER_SETTINGS.ttsVoice;
+
     return {
-      ttsVoice:
-        typeof parsed.ttsVoice === 'string' &&
-        AVAILABLE_TTS_VOICES.some((voice) => voice.id === parsed.ttsVoice)
-          ? parsed.ttsVoice
-          : DEFAULT_USER_SETTINGS.ttsVoice,
+      ttsVoice: resolvedVoice,
       ttsModel:
         typeof parsed.ttsModel === 'string' &&
         validTtsModels.includes(parsed.ttsModel as VoidAiTtsModel)

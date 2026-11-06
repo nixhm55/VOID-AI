@@ -1,8 +1,10 @@
 import {
   isOpenAiTtsVoice,
+  resolveDeepgramApiKey,
   resolveDeepgramVoiceModel,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
+  resolveVoidAiApiKey,
   synthesizeSpeechViaDeepgram,
   synthesizeSpeechViaOmniRoute,
   synthesizeSpeechViaVoidAi,
@@ -55,14 +57,22 @@ async function handle(req: Request): Promise<Response> {
     }
 
     const deepgramModel = resolveDeepgramVoiceModel(voice);
-    const preferOpenAiVoidTts =
-      isOpenAiTtsVoice(voice) ||
+    const hasDeepgramKey = Boolean(resolveDeepgramApiKey());
+    const hasVoidAiKey = Boolean(resolveVoidAiApiKey());
+    const isVoidTtsModel =
+      !model ||
       model === 'gpt-4o-mini-tts' ||
       model === 'tts-1-hd' ||
       model === 'tts-1';
 
     let result;
-    if (preferOpenAiVoidTts && !deepgramModel) {
+    // Prioritize VoidAI Speech (`gpt-4o-mini-tts` -> `tts-1-hd` -> `tts-1`) whenever
+    // an OpenAI voice is selected, or a VoidAI TTS model is active without a dedicated Deepgram key,
+    // or as primary speech engine when VOIDAI_API_KEY is configured.
+    if (
+      hasVoidAiKey &&
+      (isOpenAiTtsVoice(voice) || !deepgramModel || !hasDeepgramKey || isVoidTtsModel)
+    ) {
       try {
         result = await synthesizeSpeechViaVoidAi({
           text,
@@ -71,17 +81,37 @@ async function handle(req: Request): Promise<Response> {
           speed,
         });
       } catch {
-        result = await synthesizeSpeechViaOmniRoute({
-          text,
-          lang,
-          voice,
-          model,
-          speed,
-          baseUrl: resolveOmniBaseUrl(),
-          apiKeys: resolveOmniApiKeys(),
-        });
+        if (deepgramModel && hasDeepgramKey) {
+          try {
+            result = await synthesizeSpeechViaDeepgram({
+              text,
+              model: deepgramModel,
+              speed,
+            });
+          } catch {
+            result = await synthesizeSpeechViaOmniRoute({
+              text,
+              lang,
+              voice,
+              model: model || 'gpt-4o-mini-tts',
+              speed,
+              baseUrl: resolveOmniBaseUrl(),
+              apiKeys: resolveOmniApiKeys(),
+            });
+          }
+        } else {
+          result = await synthesizeSpeechViaOmniRoute({
+            text,
+            lang,
+            voice,
+            model: model || 'gpt-4o-mini-tts',
+            speed,
+            baseUrl: resolveOmniBaseUrl(),
+            apiKeys: resolveOmniApiKeys(),
+          });
+        }
       }
-    } else if (deepgramModel) {
+    } else if (deepgramModel && hasDeepgramKey) {
       try {
         result = await synthesizeSpeechViaDeepgram({
           text,
