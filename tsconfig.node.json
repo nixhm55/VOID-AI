@@ -18,7 +18,8 @@
   },
   "include": [
     "vite.config.ts",
+    "api/**/*.ts",
     "src/lib/omniroute-agent.ts",
-    "app/api/_lib/supabase-auth.ts"
+    "src/lib/server/**/*.ts"
   ]
 }

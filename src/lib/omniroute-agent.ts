@@ -45,6 +45,22 @@ export {
 };
 export type { OmniSearchResponse, OmniSearchResultItem };
 
+function normalizeReasoningEffort(effort?: string): string | undefined {
+  const value = effort?.trim().toLowerCase();
+  if (!value) return undefined;
+  const uiEffortMap: Record<string, string> = {
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    extra: 'xhigh',
+    max: 'xhigh',
+  };
+  if (value in uiEffortMap) return uiEffortMap[value];
+  return ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)
+    ? value
+    : undefined;
+}
+
 export interface AgentToolCall {
   id: string;
   type: 'function';
@@ -59,6 +75,7 @@ export interface AgentToolCall {
  */
 export async function callMirashOpenRouterStep(options: {
   openRouterApiKey?: string;
+  effort?: string;
   omniEndpoint: string;
   omniApiKeys: string[];
   messages: Array<{ role: string; content: string }>;
@@ -73,6 +90,7 @@ export async function callMirashOpenRouterStep(options: {
 }> {
   const {
     openRouterApiKey = OPENROUTER_API_KEY,
+    effort,
     omniEndpoint,
     omniApiKeys,
     messages,
@@ -100,6 +118,9 @@ export async function callMirashOpenRouterStep(options: {
         body: JSON.stringify({
           model,
           messages,
+          ...(normalizeReasoningEffort(effort)
+            ? { reasoning: { effort: normalizeReasoningEffort(effort) } }
+            : {}),
           stream: true,
         }),
         signal: controller.signal,
@@ -139,6 +160,7 @@ export async function callMirashOpenRouterStep(options: {
       apiKeys: omniApiKeys,
       model: DEFAULT_COMBO_MODEL,
       messages,
+      effort,
       onTextDelta,
     });
     if (omniFallback.ok) {
@@ -164,6 +186,7 @@ async function callOmniRouteChatStep(options: {
   model: string;
   messages: Array<{ role: string; content: string }>;
   enableTools?: boolean;
+  effort?: string;
   onTextDelta?: (delta: string) => void;
 }): Promise<{
   ok: boolean;
@@ -179,6 +202,7 @@ async function callOmniRouteChatStep(options: {
     model,
     messages,
     enableTools = false,
+    effort,
     onTextDelta,
   } = options;
 
@@ -192,6 +216,8 @@ async function callOmniRouteChatStep(options: {
         messages,
         stream: true,
       };
+      const normalizedEffort = normalizeReasoningEffort(effort);
+      if (normalizedEffort) payload.reasoning_effort = normalizedEffort;
       if (enableTools) {
         payload.tools = [WEB_SEARCH_TOOL_DEFINITION];
         payload.tool_choice = 'auto';
@@ -465,6 +491,7 @@ export async function executeOmniRouteAgent(options: {
   baseUrl?: string;
   apiKeys: string[];
   openRouterApiKey?: string;
+  effort?: string;
   onSseFrame: (frame: string) => void;
 }): Promise<void> {
   const {
@@ -473,6 +500,7 @@ export async function executeOmniRouteAgent(options: {
     baseUrl = DEFAULT_OMNI_BASE_URL,
     apiKeys,
     openRouterApiKey = OPENROUTER_API_KEY,
+    effort,
     onSseFrame,
   } = options;
 
@@ -607,6 +635,7 @@ export async function executeOmniRouteAgent(options: {
           omniEndpoint: chatEndpoint,
           omniApiKeys: apiKeys,
           messages: upstreamMessages,
+          effort,
           onTextDelta: (piece) => {
             rawStepText += piece;
             flushNormalizedChunks(false);
@@ -617,6 +646,7 @@ export async function executeOmniRouteAgent(options: {
           apiKeys,
           model: DEFAULT_COMBO_MODEL,
           messages: upstreamMessages,
+          effort,
           onTextDelta: (piece) => {
             rawStepText += piece;
             flushNormalizedChunks(false);
@@ -714,12 +744,13 @@ export async function runOmniRouteAgentStream(options: {
   baseUrl?: string;
   apiKeys: string[];
   openRouterApiKey?: string;
+  effort?: string;
 }): Promise<{
   status: number;
   headers: Record<string, string>;
   body: ReadableStream<Uint8Array> | string;
 }> {
-  const { rawMessages, requestedModel, baseUrl, apiKeys, openRouterApiKey } =
+  const { rawMessages, requestedModel, baseUrl, apiKeys, openRouterApiKey, effort } =
     options;
 
   const encoder = new TextEncoder();
@@ -732,6 +763,7 @@ export async function runOmniRouteAgentStream(options: {
           baseUrl,
           apiKeys,
           openRouterApiKey,
+          effort,
           onSseFrame: (frame) => {
             controller.enqueue(encoder.encode(frame));
           },

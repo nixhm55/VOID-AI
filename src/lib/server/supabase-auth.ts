@@ -32,15 +32,11 @@ export function authenticationErrorResponse(error: unknown): Response | null {
   return null;
 }
 
-export interface SupabaseApiConfig {
-  url?: string;
-  publishableKey?: string;
-}
-
-function getServerSupabaseConfig(config?: SupabaseApiConfig) {
-  const url = (config?.url ?? process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL)?.trim();
+function getServerSupabaseConfig() {
+  const url = (
+    process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL
+  )?.trim();
   const publishableKey = (
-    config?.publishableKey ??
     process.env.SUPABASE_PUBLISHABLE_KEY ??
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY
   )?.trim();
@@ -50,20 +46,17 @@ function getServerSupabaseConfig(config?: SupabaseApiConfig) {
       'Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in the server environment.',
     );
   }
-
   return { url, publishableKey };
 }
 
-/** Use the caller's JWT so all database requests continue to obey RLS. */
+/** Validate the caller's token, retaining RLS when using its client downstream. */
 export async function authenticateApiRequest(
   request: Request,
-  config?: SupabaseApiConfig,
 ): Promise<{ supabase: SupabaseClient; user: User }> {
-  const authorization = request.headers.get('authorization');
-  const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = request.headers.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
   if (!token) throw new AuthenticationRequiredError();
 
-  const { url, publishableKey } = getServerSupabaseConfig(config);
+  const { url, publishableKey } = getServerSupabaseConfig();
   const supabase = createClient(url, publishableKey, {
     auth: {
       autoRefreshToken: false,
@@ -75,6 +68,5 @@ export async function authenticateApiRequest(
 
   const { data, error } = await supabase.auth.getUser(token);
   if (error || !data.user) throw new AuthenticationRequiredError();
-
   return { supabase, user: data.user };
 }
