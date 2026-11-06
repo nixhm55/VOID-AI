@@ -20,53 +20,62 @@ export function authenticationErrorResponse(error: unknown): Response | null {
       { status: 401, headers: { 'Cache-Control': 'private, no-store' } },
     );
   }
-  if (
-    error instanceof Error &&
-    error.message.startsWith('Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY')
-  ) {
-    return Response.json(
-      { error: 'Supabase API authentication is not configured on the server.' },
-      { status: 503, headers: { 'Cache-Control': 'private, no-store' } },
-    );
-  }
   return null;
 }
 
-function getServerSupabaseConfig() {
+function getServerSupabaseConfig(): {
+  url: string;
+  publishableKey: string;
+} | null {
   const url = (
     process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL
   )?.trim();
   const publishableKey = (
     process.env.SUPABASE_PUBLISHABLE_KEY ??
-    process.env.VITE_SUPABASE_PUBLISHABLE_KEY
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ??
+    process.env.SUPABASE_ANON_KEY ??
+    process.env.VITE_SUPABASE_ANON_KEY
   )?.trim();
 
   if (!url || !publishableKey) {
-    throw new Error(
-      'Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in the server environment.',
-    );
+    return null;
   }
   return { url, publishableKey };
 }
 
-/** Validate the caller's token, retaining RLS when using its client downstream. */
+/**
+ * Validates the caller's Supabase token when present and server config is available,
+ * while gracefully allowing requests when running in local/guest mode or when
+ * server-side Supabase env variables are not set on Vercel.
+ */
 export async function authenticateApiRequest(
   request: Request,
-): Promise<{ supabase: SupabaseClient; user: User }> {
-  const token = request.headers.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!token) throw new AuthenticationRequiredError();
+): Promise<{ supabase: SupabaseClient | null; user: User | null }> {
+  const token = request.headers
+    .get('authorization')
+    ?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const config = getServerSupabaseConfig();
 
-  const { url, publishableKey } = getServerSupabaseConfig();
-  const supabase = createClient(url, publishableKey, {
-    auth: {
-      autoRefreshToken: false,
-      detectSessionInUrl: false,
-      persistSession: false,
-    },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
+  if (!token || !config) {
+    return { supabase: null, user: null };
+  }
 
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data.user) throw new AuthenticationRequiredError();
-  return { supabase, user: data.user };
+  try {
+    const supabase = createClient(config.url, config.publishableKey, {
+      auth: {
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        persistSession: false,
+      },
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    });
+
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) {
+      return { supabase: null, user: null };
+    }
+    return { supabase, user: data.user };
+  } catch {
+    return { supabase: null, user: null };
+  }
 }

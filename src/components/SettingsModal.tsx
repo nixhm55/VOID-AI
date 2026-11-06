@@ -16,6 +16,7 @@ import {
 } from '../lib/tools/config';
 import { isOpenAiTtsVoice } from '../lib/tools/text_to_speech';
 import { authenticatedFetch } from '../lib/api-fetch';
+import { listAllStoredMemories } from '../lib/memory-storage';
 
 interface SettingsModalProps {
   open: boolean;
@@ -26,7 +27,8 @@ interface SettingsModalProps {
 }
 
 type SettingsTab = 'voice' | 'models' | 'general';
-type VoiceBrowseView = null | 'Female' | 'Male' | 'gpt';
+type VoiceSubView = null | 'Male' | 'Female' | 'gpt' | 'speech' | 'transcription';
+type ModelsOpenBox = null | 'embeddings' | 'moderation';
 
 const SPEED_OPTIONS = [0.9, 1.0, 1.1, 1.2];
 
@@ -42,18 +44,18 @@ const voiceMeta = (voice: VoiceOption) =>
     voice.gender,
     providerLabel(voice.provider),
     voice.supportedModels && voice.supportedModels.length === 1
-      ? 'gpt-4o-mini-tts only (auto-fallback)'
+      ? 'gpt-4o-mini-tts only'
       : null,
   ]
     .filter(Boolean)
     .join(' · ');
 
 function RoleBadge({ role }: { role: string }) {
-  const isPrimary = role === 'Primary';
+  const isHighlighted = role === 'Primary' || role === 'Default';
   return (
     <span
-      className={`rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-        isPrimary
+      className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+        isHighlighted
           ? 'border-[#b39dff]/40 bg-[#b39dff]/15 text-[#d8c8ff]'
           : 'border-white/[0.12] bg-white/[0.04] text-[#9a9aa2]'
       }`}
@@ -123,6 +125,24 @@ function NavItem({
   );
 }
 
+function ChevronRight({ rotated = false }: { rotated?: boolean }) {
+  return (
+    <svg
+      className={`h-3.5 w-3.5 shrink-0 transition-transform duration-150 ${
+        rotated ? 'rotate-90' : ''
+      }`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
 export default function SettingsModal({
   open,
   settings,
@@ -131,13 +151,26 @@ export default function SettingsModal({
   onClose,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('voice');
-  const [voiceView, setVoiceView] = useState<VoiceBrowseView>(null);
+  const [voiceView, setVoiceView] = useState<VoiceSubView>(null);
+  const [modelsOpenBox, setModelsOpenBox] = useState<ModelsOpenBox>(null);
   const [gptGenderFilter, setGptGenderFilter] = useState<
     'All' | 'Male' | 'Female'
   >('All');
   const [query, setQuery] = useState('');
   const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // Live connection status for AI Models tab (Memory & Embeddings + Moderation)
+  const [embeddingStatus, setEmbeddingStatus] = useState<
+    'idle' | 'checking' | 'connected' | 'error'
+  >('idle');
+  const [embeddingDetail, setEmbeddingDetail] = useState<string>('');
+  const [moderationStatus, setModerationStatus] = useState<
+    'idle' | 'checking' | 'connected' | 'error'
+  >('idle');
+  const [moderationDetail, setModerationDetail] = useState<string>('');
+  const [memoryCount, setMemoryCount] = useState<number>(0);
+
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -145,12 +178,15 @@ export default function SettingsModal({
       setConfirmClear(false);
       setQuery('');
       setVoiceView(null);
+      setModelsOpenBox(null);
       setGptGenderFilter('All');
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current = null;
       }
       setPreviewingVoice(null);
+    } else {
+      setMemoryCount(listAllStoredMemories().length);
     }
   }, [open]);
 
@@ -162,6 +198,83 @@ export default function SettingsModal({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
+
+  const checkEmbeddingsConnection = async (modelToTest?: VoidAiEmbeddingModel) => {
+    setEmbeddingStatus('checking');
+    setEmbeddingDetail('Verifying embedding pipeline…');
+    try {
+      const res = await authenticatedFetch('/api/embeddings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: 'VOID semantic memory connection check',
+          model: modelToTest || settings.embeddingModel,
+        }),
+      });
+      if (!res.ok) {
+        setEmbeddingStatus('error');
+        setEmbeddingDetail(`HTTP ${res.status}`);
+        return;
+      }
+      const data = (await res.json()) as {
+        model?: string;
+        dimensions?: number;
+      };
+      setEmbeddingStatus('connected');
+      setEmbeddingDetail(
+        `Connected · ${data.model || settings.embeddingModel} (${data.dimensions || 3072}d)`,
+      );
+      setMemoryCount(listAllStoredMemories().length);
+    } catch {
+      setEmbeddingStatus('error');
+      setEmbeddingDetail('Connection failed');
+    }
+  };
+
+  const checkModerationConnection = async () => {
+    setModerationStatus('checking');
+    setModerationDetail('Verifying moderation filter…');
+    try {
+      const res = await authenticatedFetch('/api/moderation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: 'Hello, checking safety moderation status.',
+        }),
+      });
+      if (!res.ok) {
+        setModerationStatus('error');
+        setModerationDetail(`HTTP ${res.status}`);
+        return;
+      }
+      const data = (await res.json()) as {
+        model?: string;
+        gatewayAvailable?: boolean;
+      };
+      setModerationStatus('connected');
+      setModerationDetail(
+        data.gatewayAvailable !== false
+          ? `Connected · ${data.model || 'omni-moderation-latest'}`
+          : `Ready (Safe fail-open · ${data.model || 'omni-moderation-latest'})`,
+      );
+    } catch {
+      setModerationStatus('error');
+      setModerationDetail('Connection failed');
+    }
+  };
+
+  // Automatically verify connections when opening the AI Models tab
+  useEffect(() => {
+    if (open && activeTab === 'models') {
+      if (embeddingStatus === 'idle') {
+        void checkEmbeddingsConnection();
+      }
+      if (moderationStatus === 'idle') {
+        void checkModerationConnection();
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeTab]);
 
   const voiceCounts = useMemo(
     () => ({
@@ -182,8 +295,14 @@ export default function SettingsModal({
     ) ??
     null;
 
+  const activeSttEntry =
+    STT_MODEL_CATALOG.find((m) => m.id === settings.sttModel) ??
+    STT_MODEL_CATALOG[0];
+
   const filteredVoices = useMemo(() => {
-    if (!voiceView) return [];
+    if (voiceView !== 'Male' && voiceView !== 'Female' && voiceView !== 'gpt') {
+      return [];
+    }
     const q = query.trim().toLowerCase();
 
     return AVAILABLE_TTS_VOICES.filter((voice) => {
@@ -276,14 +395,14 @@ export default function SettingsModal({
       <div
         key={voice.id}
         onClick={() => onUpdateSettings({ ...settings, ttsVoice: voice.id })}
-        className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+        className={`flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
           selected
             ? 'border-white/[0.22] bg-white/[0.06]'
-            : 'border-transparent hover:border-white/[0.08] hover:bg-white/[0.03]'
+            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'
         }`}
       >
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
             <span className="truncate text-[13px] font-medium text-[#ededed]">
               {voice.name}
             </span>
@@ -311,7 +430,7 @@ export default function SettingsModal({
             void handlePreviewVoice(voice);
           }}
           aria-label={`Preview ${voice.name}`}
-          className="rounded-md px-2 py-1 text-[11.5px] font-medium text-[#a1a1a6] transition-colors hover:bg-white/[0.08] hover:text-white"
+          className="shrink-0 rounded-md px-2.5 py-1 text-[11.5px] font-medium text-[#a1a1a6] transition-colors hover:bg-white/[0.08] hover:text-white"
         >
           {isPreviewing ? 'Stop' : 'Preview'}
         </button>
@@ -342,7 +461,7 @@ export default function SettingsModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-[ai-fade-in_160ms_ease-out]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 sm:p-4 animate-[ai-fade-in_160ms_ease-out]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -351,11 +470,11 @@ export default function SettingsModal({
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="flex h-[640px] max-h-[calc(100vh-2rem)] w-full max-w-[740px] flex-col overflow-hidden rounded-2xl border border-white/[0.09] bg-[#111111] text-[#ededed] shadow-2xl md:flex-row"
+        className="flex h-[580px] max-h-[calc(100vh-2rem)] w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-[#111113] text-[#ededed] shadow-2xl md:flex-row"
       >
         {/* Left navigation */}
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] bg-[#0d0d0d] px-3 py-2 md:w-[200px] md:flex-col md:items-stretch md:gap-0.5 md:overflow-visible md:border-b-0 md:border-r md:px-3 md:py-4">
-          <div className="hidden px-2 pb-3 text-[12.5px] font-semibold text-[#ededed] md:block">
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] bg-[#0c0c0e] px-3 py-2.5 md:w-[190px] md:flex-col md:items-stretch md:gap-1 md:overflow-visible md:border-b-0 md:border-r md:px-3 md:py-4">
+          <div className="hidden px-2.5 pb-3 text-[12.5px] font-semibold text-[#ededed] md:block">
             Settings
           </div>
 
@@ -387,7 +506,10 @@ export default function SettingsModal({
 
           <NavItem
             active={activeTab === 'models'}
-            onClick={() => setActiveTab('models')}
+            onClick={() => {
+              setActiveTab('models');
+              setModelsOpenBox(null);
+            }}
             icon={
               <svg
                 viewBox="0 0 24 24"
@@ -434,29 +556,30 @@ export default function SettingsModal({
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#8a8a8f] hover:bg-white/[0.06] hover:text-white md:hidden"
+            className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#8a8a8f] hover:bg-white/[0.06] hover:text-white md:hidden"
           >
             ✕
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-start justify-between gap-4 px-5 pt-5 md:px-6">
-            <div>
-              <h2 className="text-[15px] font-semibold text-white">
+        {/* Right Content Column — min-w-0 prevents any horizontal box clipping */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Header */}
+          <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4 md:px-6">
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate text-[15px] font-semibold text-white">
                 {activeTab === 'voice'
                   ? 'Voice & Speech'
                   : activeTab === 'models'
-                    ? 'Specialized AI Models & Fallbacks'
+                    ? 'AI Models'
                     : 'General'}
               </h2>
-              <p className="mt-1 text-[12px] leading-relaxed text-[#8a8a8f]">
+              <p className="mt-0.5 text-[12px] leading-relaxed text-[#8a8a8f]">
                 {activeTab === 'voice'
-                  ? 'Choose Male or Female voices, configure GPT Speech synthesis, and select your transcription engine.'
+                  ? 'Select voices, speech model, and transcription engine.'
                   : activeTab === 'models'
-                    ? 'Separated model selectors and automatic fallback chains for Memory/Embeddings, Speech (TTS), Transcription (STT), and Moderation.'
-                    : 'Interface and conversation preferences for this browser.'}
+                    ? 'Configure semantic memory embeddings and safety moderation.'
+                    : 'Interface and conversation preferences.'}
               </p>
             </div>
 
@@ -481,126 +604,191 @@ export default function SettingsModal({
             </button>
           </div>
 
+          {/* VOICE & SPEECH TAB */}
           {activeTab === 'voice' ? (
             <>
               {voiceView === null ? (
-                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 md:px-6">
-                  <div className="text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                    CURRENT VOICE
-                  </div>
-                  <div className="mt-2 flex items-center gap-3 rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-[13px] font-medium text-[#ededed]">
-                          {selectedVoice ? selectedVoice.name : 'Not selected'}
-                        </span>
-                        {selectedVoice ? (
-                          <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#a1a1aa]">
-                            {selectedVoice.gender}
-                          </span>
-                        ) : null}
-                        {selectedVoice &&
-                        selectedVoice.id === DEFAULT_USER_SETTINGS.ttsVoice ? (
-                          <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#8a8a8f]">
-                            Default
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
-                        {selectedVoice ? voiceMeta(selectedVoice) : '—'}
-                      </p>
+                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4 md:px-6">
+                  {/* Current Voice Box */}
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6f6f76]">
+                      Current Voice
                     </div>
-                    {selectedVoice ? (
-                      <button
-                        type="button"
-                        onClick={() => void handlePreviewVoice(selectedVoice)}
-                        aria-label={`Preview ${selectedVoice.name}`}
-                        className="shrink-0 rounded-md px-2 py-1 text-[11.5px] font-medium text-[#a1a1a6] transition-colors hover:bg-white/[0.08] hover:text-white"
-                      >
-                        {previewingVoice === selectedVoice.id
-                          ? 'Stop'
-                          : 'Preview'}
-                      </button>
-                    ) : null}
-                  </div>
-
-                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                    BROWSE VOICES BY GENDER (MALE / FEMALE) & GPT SPEECH
-                  </div>
-                  <div className="mt-2 space-y-1.5">
-                    {(['Male', 'Female'] as const).map((gender) => (
-                      <button
-                        key={gender}
-                        type="button"
-                        onClick={() => {
-                          setVoiceView(gender);
-                          setQuery('');
-                        }}
-                        className="flex w-full items-center justify-between rounded-lg border border-white/[0.07] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.04]"
-                      >
-                        <span className="text-[13px] font-medium text-[#ededed]">
-                          {gender}
-                        </span>
-                        <span className="flex items-center gap-2 text-[11.5px] text-[#8a8a8f]">
-                          {voiceCounts[gender]} voices
-                          <svg
-                            className="h-3.5 w-3.5"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <polyline points="9 18 15 12 9 6" />
-                          </svg>
-                        </span>
-                      </button>
-                    ))}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setVoiceView('gpt');
-                        setGptGenderFilter('All');
-                        setQuery('');
-                      }}
-                      className="flex w-full items-center justify-between rounded-lg border border-[#b39dff]/25 bg-[#b39dff]/[0.06] px-3 py-2.5 text-left transition-colors hover:bg-[#b39dff]/[0.11]"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[13px] font-medium text-white">
-                            GPT Speech (Natural Voices & Models)
+                    <div className="mt-1.5 flex w-full min-w-0 items-center justify-between gap-3 rounded-xl border border-white/[0.09] bg-white/[0.03] px-3.5 py-2.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="truncate text-[13px] font-medium text-[#ededed]">
+                            {selectedVoice ? selectedVoice.name : 'Coral'}
                           </span>
-                          <RoleBadge role="Primary" />
+                          {selectedVoice ? (
+                            <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#a1a1aa]">
+                              {selectedVoice.gender}
+                            </span>
+                          ) : null}
+                          {selectedVoice &&
+                          selectedVoice.id === DEFAULT_USER_SETTINGS.ttsVoice ? (
+                            <span className="rounded border border-white/[0.1] px-1.5 py-0.5 text-[10px] leading-none text-[#8a8a8f]">
+                              Default
+                            </span>
+                          ) : null}
                         </div>
-                        <p className="mt-0.5 text-[11px] text-[#a1a1aa]">
-                          Active model: {settings.ttsModel} · Automatic fallback:
-                          gpt-4o-mini-tts → tts-1-hd → tts-1
+                        <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
+                          {selectedVoice ? voiceMeta(selectedVoice) : '—'}
                         </p>
                       </div>
-                      <span className="flex items-center gap-2 text-[11.5px] text-[#d8c8ff]">
-                        {voiceCounts.gpt} voices
-                        <svg
-                          className="h-3.5 w-3.5"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
+                      {selectedVoice ? (
+                        <button
+                          type="button"
+                          onClick={() => void handlePreviewVoice(selectedVoice)}
+                          aria-label={`Preview ${selectedVoice.name}`}
+                          className="shrink-0 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11.5px] font-medium text-[#d4d4d8] transition-colors hover:bg-white/[0.1] hover:text-white"
                         >
-                          <polyline points="9 18 15 12 9 6" />
-                        </svg>
-                      </span>
-                    </button>
+                          {previewingVoice === selectedVoice.id
+                            ? 'Stop'
+                            : 'Preview'}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
 
-                  {/* Speech Model Selector directly accessible in Voice tab */}
-                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                    SPEECH / TEXT-TO-SPEECH MODEL SELECTOR
+                  {/* Voice Categories: Male, Female, GPT (all 3 styled identically as compact boxes!) */}
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6f6f76]">
+                      Voice
+                    </div>
+                    <div className="mt-1.5 space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVoiceView('Male');
+                          setQuery('');
+                        }}
+                        className="flex w-full min-w-0 items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.05]"
+                      >
+                        <span className="text-[13px] font-medium text-[#ededed]">
+                          Male
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2 text-[12px] text-[#8a8a8f]">
+                          {voiceCounts.Male} voices
+                          <ChevronRight />
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVoiceView('Female');
+                          setQuery('');
+                        }}
+                        className="flex w-full min-w-0 items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.05]"
+                      >
+                        <span className="text-[13px] font-medium text-[#ededed]">
+                          Female
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2 text-[12px] text-[#8a8a8f]">
+                          {voiceCounts.Female} voices
+                          <ChevronRight />
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVoiceView('gpt');
+                          setGptGenderFilter('All');
+                          setQuery('');
+                        }}
+                        className="flex w-full min-w-0 items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.05]"
+                      >
+                        <span className="text-[13px] font-medium text-[#ededed]">
+                          GPT
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2 text-[12px] text-[#8a8a8f]">
+                          {voiceCounts.gpt} voices
+                          <ChevronRight />
+                        </span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-2 space-y-1.5">
+
+                  {/* Speech (Closed box by default; opens when clicked) */}
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6f6f76]">
+                      Speech
+                    </div>
+                    <div className="mt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setVoiceView('speech')}
+                        className="flex w-full min-w-0 items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.05]"
+                      >
+                        <span className="text-[13px] font-medium text-[#ededed]">
+                          Speech
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2 text-[12px] text-[#8a8a8f]">
+                          <span className="font-mono text-[11.5px] text-[#a1a1aa]">
+                            {settings.ttsModel}
+                          </span>
+                          <ChevronRight />
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Transcription (Closed box by default; opens when clicked) */}
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6f6f76]">
+                      Transcription
+                    </div>
+                    <div className="mt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setVoiceView('transcription')}
+                        className="flex w-full min-w-0 items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 py-2.5 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.05]"
+                      >
+                        <span className="text-[13px] font-medium text-[#ededed]">
+                          GPT
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2 text-[12px] text-[#8a8a8f]">
+                          <span className="truncate text-[11.5px] text-[#a1a1aa]">
+                            {settings.sttModel === 'default'
+                              ? 'Default (EN / ML / HI)'
+                              : activeSttEntry.name}
+                          </span>
+                          <ChevronRight />
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : voiceView === 'speech' ? (
+                /* Speech Model Sub-View (Opened when Speech box is clicked) */
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 md:px-6">
+                  <div className="flex items-center justify-between pb-3">
+                    <button
+                      type="button"
+                      onClick={() => setVoiceView(null)}
+                      className="flex items-center gap-1.5 text-[12.5px] font-medium text-[#a1a1aa] transition-colors hover:text-white"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="15 18 9 12 15 6" />
+                      </svg>
+                      Back to Voice & Speech
+                    </button>
+                    <span className="text-[11.5px] text-[#6f6f76]">
+                      Speech Models
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
                     {TTS_MODEL_CATALOG.map((m) => {
                       const active = settings.ttsModel === m.id;
                       return (
@@ -610,20 +798,20 @@ export default function SettingsModal({
                           onClick={() =>
                             handleSelectTtsModel(m.id as VoidAiTtsModel)
                           }
-                          className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                          className={`flex w-full min-w-0 items-center justify-between gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors ${
                             active
-                              ? 'border-white/[0.22] bg-white/[0.06]'
-                              : 'border-white/[0.07] hover:bg-white/[0.03]'
+                              ? 'border-white/[0.24] bg-white/[0.06]'
+                              : 'border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.04]'
                           }`}
                         >
-                          <div className="min-w-0 pr-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-[13px] font-medium text-[#ededed]">
                                 {m.name}
                               </span>
                               <RoleBadge role={m.role} />
                             </div>
-                            <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                            <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
                               {m.description}
                             </p>
                           </div>
@@ -652,12 +840,35 @@ export default function SettingsModal({
                       );
                     })}
                   </div>
-
-                  {/* Transcription / STT Model Selector */}
-                  <div className="mt-5 text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                    TRANSCRIPTION / SPEECH-TO-TEXT MODEL SELECTOR
+                </div>
+              ) : voiceView === 'transcription' ? (
+                /* Transcription Model Sub-View (Default Coding Engine at top + imported models below) */
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 md:px-6">
+                  <div className="flex items-center justify-between pb-3">
+                    <button
+                      type="button"
+                      onClick={() => setVoiceView(null)}
+                      className="flex items-center gap-1.5 text-[12.5px] font-medium text-[#a1a1aa] transition-colors hover:text-white"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="15 18 9 12 15 6" />
+                      </svg>
+                      Back to Voice & Speech
+                    </button>
+                    <span className="text-[11.5px] text-[#6f6f76]">
+                      Transcription
+                    </span>
                   </div>
-                  <div className="mt-2 space-y-1.5">
+
+                  <div className="space-y-2">
                     {STT_MODEL_CATALOG.map((m) => {
                       const active = settings.sttModel === m.id;
                       return (
@@ -670,20 +881,20 @@ export default function SettingsModal({
                               sttModel: m.id as TranscriptionModelId,
                             })
                           }
-                          className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                          className={`flex w-full min-w-0 items-center justify-between gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors ${
                             active
-                              ? 'border-white/[0.22] bg-white/[0.06]'
-                              : 'border-white/[0.07] hover:bg-white/[0.03]'
+                              ? 'border-white/[0.24] bg-white/[0.06]'
+                              : 'border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.04]'
                           }`}
                         >
-                          <div className="min-w-0 pr-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[13px] font-medium text-[#ededed]">
                                 {m.name}
                               </span>
                               <RoleBadge role={m.role} />
                             </div>
-                            <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                            <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
                               {m.description}
                             </p>
                           </div>
@@ -714,15 +925,16 @@ export default function SettingsModal({
                   </div>
                 </div>
               ) : (
-                <>
-                  <div className="flex items-center justify-between px-5 pt-4 md:px-6">
+                /* Male / Female / GPT Voice List Sub-View */
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div className="flex shrink-0 items-center justify-between px-5 pt-3.5 md:px-6">
                     <button
                       type="button"
                       onClick={() => {
                         setVoiceView(null);
                         setQuery('');
                       }}
-                      className="flex items-center gap-1 text-[12.5px] font-medium text-[#8a8a8f] transition-colors hover:text-white"
+                      className="flex items-center gap-1.5 text-[12.5px] font-medium text-[#a1a1aa] transition-colors hover:text-white"
                     >
                       <svg
                         className="h-3.5 w-3.5"
@@ -735,70 +947,35 @@ export default function SettingsModal({
                       >
                         <polyline points="15 18 9 12 15 6" />
                       </svg>
-                      All voices & speech settings
+                      Back to Voice & Speech
                     </button>
                     <span className="text-[11.5px] text-[#6f6f76]">
                       {voiceView === 'gpt'
-                        ? `GPT Natural Voices · ${filteredVoices.length}`
-                        : `${voiceView} · ${voiceCounts[voiceView]}`}
+                        ? `GPT · ${filteredVoices.length} voices`
+                        : `${voiceView} · ${voiceCounts[voiceView]} voices`}
                     </span>
                   </div>
 
                   {voiceView === 'gpt' ? (
-                    <div className="space-y-2.5 px-5 pt-3 md:px-6">
-                      <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-2.5">
-                        <div className="text-[11px] font-medium text-[#9a9aa2]">
-                          GPT SPEECH MODEL (AUTOMATIC FALLBACK: gpt-4o-mini-tts →
-                          tts-1-hd → tts-1)
-                        </div>
-                        <div className="mt-2 grid grid-cols-3 gap-1.5">
-                          {TTS_MODEL_CATALOG.map((m) => {
-                            const active = settings.ttsModel === m.id;
-                            return (
-                              <button
-                                key={m.id}
-                                type="button"
-                                onClick={() =>
-                                  handleSelectTtsModel(m.id as VoidAiTtsModel)
-                                }
-                                className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
-                                  active
-                                    ? 'border-[#b39dff]/50 bg-[#b39dff]/15 text-white'
-                                    : 'border-white/[0.08] bg-white/[0.02] text-[#a1a1aa] hover:text-white'
-                                }`}
-                              >
-                                <div className="truncate font-mono text-[11.5px] font-medium">
-                                  {m.name}
-                                </div>
-                                <div className="text-[10px] text-[#8a8a8f]">
-                                  {m.role}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5">
-                        {(['All', 'Male', 'Female'] as const).map((g) => (
-                          <button
-                            key={g}
-                            type="button"
-                            onClick={() => setGptGenderFilter(g)}
-                            className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
-                              gptGenderFilter === g
-                                ? 'bg-white/[0.12] text-white'
-                                : 'text-[#8a8a8f] hover:bg-white/[0.05] hover:text-white'
-                            }`}
-                          >
-                            {g}
-                          </button>
-                        ))}
-                      </div>
+                    <div className="flex shrink-0 items-center gap-1.5 px-5 pt-2.5 md:px-6">
+                      {(['All', 'Male', 'Female'] as const).map((g) => (
+                        <button
+                          key={g}
+                          type="button"
+                          onClick={() => setGptGenderFilter(g)}
+                          className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                            gptGenderFilter === g
+                              ? 'bg-white/[0.12] text-white'
+                              : 'text-[#8a8a8f] hover:bg-white/[0.05] hover:text-white'
+                          }`}
+                        >
+                          {g}
+                        </button>
+                      ))}
                     </div>
                   ) : null}
 
-                  <div className="px-5 pt-3 md:px-6">
+                  <div className="shrink-0 px-5 pt-2.5 md:px-6">
                     <div className="relative">
                       <svg
                         className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#6f6f76]"
@@ -817,12 +994,12 @@ export default function SettingsModal({
                         onChange={(e) => setQuery(e.target.value)}
                         placeholder={`Search ${voiceView === 'gpt' ? 'GPT' : voiceView} voices`}
                         aria-label={`Search ${voiceView === 'gpt' ? 'GPT' : voiceView} voices`}
-                        className="h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.03] pl-9 pr-3 text-[13px] text-[#ededed] placeholder:text-[#6f6f76] focus:border-white/[0.2] focus:outline-none"
+                        className="h-8.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.03] pl-9 pr-3 py-1.5 text-[12.5px] text-[#ededed] placeholder:text-[#6f6f76] focus:border-white/[0.2] focus:outline-none"
                       />
                     </div>
                   </div>
 
-                  <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-5 py-4 md:px-6">
+                  <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-5 py-3 md:px-6">
                     {filteredVoices.map(renderVoiceRow)}
 
                     {filteredVoices.length === 0 ? (
@@ -831,20 +1008,21 @@ export default function SettingsModal({
                       </p>
                     ) : null}
                   </div>
-                </>
+                </div>
               )}
 
-              <div className="space-y-3.5 border-t border-white/[0.07] px-5 py-4 md:px-6">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+              {/* Footer: Speech speed & Auto-read responses */}
+              <div className="shrink-0 space-y-3 border-t border-white/[0.07] bg-[#0e0e10] px-5 py-3.5 md:px-6">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
                     <div className="text-[13px] font-medium text-[#ededed]">
                       Speech speed
                     </div>
-                    <div className="text-[11.5px] text-[#8a8a8f]">
+                    <div className="truncate text-[11.5px] text-[#8a8a8f]">
                       Playback rate for spoken replies
                     </div>
                   </div>
-                  <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.02] p-0.5">
+                  <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.02] p-0.5">
                     {SPEED_OPTIONS.map((spd) => (
                       <button
                         key={spd}
@@ -853,9 +1031,9 @@ export default function SettingsModal({
                           onUpdateSettings({ ...settings, ttsSpeed: spd })
                         }
                         aria-pressed={Math.abs(settings.ttsSpeed - spd) < 0.02}
-                        className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                        className={`rounded-md px-2 py-1 text-[11.5px] font-medium transition-colors ${
                           Math.abs(settings.ttsSpeed - spd) < 0.02
-                            ? 'bg-white/[0.1] text-white'
+                            ? 'bg-white/[0.12] text-white'
                             : 'text-[#8a8a8f] hover:text-[#e6e6e9]'
                         }`}
                       >
@@ -865,12 +1043,12 @@ export default function SettingsModal({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
                     <div className="text-[13px] font-medium text-[#ededed]">
                       Auto-read responses
                     </div>
-                    <div className="text-[11.5px] text-[#8a8a8f]">
+                    <div className="truncate text-[11.5px] text-[#8a8a8f]">
                       Read VOID replies aloud when they finish
                     </div>
                   </div>
@@ -888,202 +1066,235 @@ export default function SettingsModal({
               </div>
             </>
           ) : activeTab === 'models' ? (
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4 md:px-6">
-              {/* 1. Memory / Embeddings */}
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-[12px] font-semibold tracking-wide text-white">
-                    1. MEMORY / EMBEDDINGS
-                  </div>
-                  <span className="text-[11px] text-[#8a8a8f]">
-                    Dimension-isolated indexes (3072d / 1536d)
-                  </span>
-                </div>
-                <div className="mt-2.5 space-y-1.5">
-                  {EMBEDDING_MODEL_CATALOG.map((m) => {
-                    const active = settings.embeddingModel === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() =>
-                          onUpdateSettings({
-                            ...settings,
-                            embeddingModel: m.id as VoidAiEmbeddingModel,
-                          })
-                        }
-                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
-                          active
-                            ? 'border-white/[0.22] bg-white/[0.06]'
-                            : 'border-white/[0.07] hover:bg-white/[0.03]'
+            /* AI MODELS TAB — Only Memory/Embeddings and Moderation, closed by default! */
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4 md:px-6">
+              {/* 1. Memory / Embeddings Collapsible Box */}
+              <div className="overflow-hidden rounded-xl border border-white/[0.09] bg-white/[0.02]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setModelsOpenBox((prev) =>
+                      prev === 'embeddings' ? null : 'embeddings',
+                    )
+                  }
+                  className="flex w-full min-w-0 items-center justify-between gap-3 px-4 py-3.5 text-left transition-colors hover:bg-white/[0.03]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13.5px] font-medium text-white">
+                        Memory & Embeddings
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+                          embeddingStatus === 'connected'
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                            : embeddingStatus === 'error'
+                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                              : 'border-white/10 bg-white/5 text-[#a1a1aa]'
                         }`}
                       >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
-                              {m.name}
-                            </span>
-                            <RoleBadge role={m.role} />
-                          </div>
-                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
-                            {m.description}
-                          </p>
-                        </div>
-                        <span className="font-mono text-[11px] text-[#a1a1aa]">
-                          {m.dimensions}d · {active ? 'Selected' : 'Auto-fallback'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 2. Speech / Text-to-Speech */}
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-[12px] font-semibold tracking-wide text-white">
-                    2. SPEECH / TEXT-TO-SPEECH
-                  </div>
-                  <span className="text-[11px] text-[#8a8a8f]">
-                    Primary → First fallback → Second fallback
-                  </span>
-                </div>
-                <div className="mt-2.5 space-y-1.5">
-                  {TTS_MODEL_CATALOG.map((m) => {
-                    const active = settings.ttsModel === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() =>
-                          handleSelectTtsModel(m.id as VoidAiTtsModel)
-                        }
-                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
-                          active
-                            ? 'border-white/[0.22] bg-white/[0.06]'
-                            : 'border-white/[0.07] hover:bg-white/[0.03]'
-                        }`}
-                      >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
-                              {m.name}
-                            </span>
-                            <RoleBadge role={m.role} />
-                          </div>
-                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
-                            {m.description}
-                          </p>
-                        </div>
-                        <span className="text-[11px] text-[#a1a1aa]">
-                          {active ? 'Selected' : 'Auto-fallback'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 3. Transcription / Speech-to-Text */}
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-[12px] font-semibold tracking-wide text-white">
-                    3. TRANSCRIPTION / SPEECH-TO-TEXT
-                  </div>
-                  <span className="text-[11px] text-[#8a8a8f]">
-                    Auto-detects EN / ML / HI without translation
-                  </span>
-                </div>
-                <div className="mt-2.5 space-y-1.5">
-                  {STT_MODEL_CATALOG.map((m) => {
-                    const active = settings.sttModel === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() =>
-                          onUpdateSettings({
-                            ...settings,
-                            sttModel: m.id as TranscriptionModelId,
-                          })
-                        }
-                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
-                          active
-                            ? 'border-white/[0.22] bg-white/[0.06]'
-                            : 'border-white/[0.07] hover:bg-white/[0.03]'
-                        }`}
-                      >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
-                              {m.name}
-                            </span>
-                            <RoleBadge role={m.role} />
-                          </div>
-                          <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
-                            {m.description}
-                          </p>
-                        </div>
-                        <span className="text-[11px] text-[#a1a1aa]">
-                          {active ? 'Selected' : 'Auto-fallback'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 4. Moderation */}
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-[12px] font-semibold tracking-wide text-white">
-                      4. MODERATION
-                    </div>
-                    <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
-                      Multimodal text & image safety filter (fails open safely)
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.moderationEnabled}
-                    label="Enable content moderation"
-                    onChange={() =>
-                      onUpdateSettings({
-                        ...settings,
-                        moderationEnabled: !settings.moderationEnabled,
-                      })
-                    }
-                  />
-                </div>
-                <div className="mt-2.5 space-y-1.5">
-                  {MODERATION_MODEL_CATALOG.map((m) => (
-                    <div
-                      key={m.id}
-                      className="flex w-full items-center justify-between rounded-lg border border-white/[0.22] bg-white/[0.06] px-3 py-2"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
-                            {m.name}
-                          </span>
-                          <RoleBadge role={m.role} />
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-[#8a8a8f]">
-                          {m.description}
-                        </p>
-                      </div>
-                      <span className="text-[11px] text-emerald-400">
-                        Active
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            embeddingStatus === 'connected'
+                              ? 'bg-emerald-400'
+                              : embeddingStatus === 'error'
+                                ? 'bg-amber-400'
+                                : 'bg-[#a1a1aa]'
+                          }`}
+                        />
+                        {embeddingStatus === 'connected'
+                          ? 'Connected'
+                          : embeddingStatus === 'checking'
+                            ? 'Checking…'
+                            : 'Ready'}
                       </span>
                     </div>
-                  ))}
-                </div>
+                    <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
+                      Active: {settings.embeddingModel} · {memoryCount} saved
+                      memories
+                    </p>
+                  </div>
+                  <ChevronRight rotated={modelsOpenBox === 'embeddings'} />
+                </button>
+
+                {modelsOpenBox === 'embeddings' ? (
+                  <div className="space-y-2.5 border-t border-white/[0.07] bg-black/20 px-4 py-3.5">
+                    {EMBEDDING_MODEL_CATALOG.map((m) => {
+                      const active = settings.embeddingModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            const nextModel = m.id as VoidAiEmbeddingModel;
+                            onUpdateSettings({
+                              ...settings,
+                              embeddingModel: nextModel,
+                            });
+                            void checkEmbeddingsConnection(nextModel);
+                          }}
+                          className={`flex w-full min-w-0 items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                            active
+                              ? 'border-white/[0.22] bg-white/[0.06]'
+                              : 'border-white/[0.07] bg-white/[0.01] hover:bg-white/[0.04]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                                {m.name}
+                              </span>
+                              <RoleBadge role={m.role} />
+                            </div>
+                            <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                              {m.description}
+                            </p>
+                          </div>
+                          <span className="shrink-0 font-mono text-[11px] text-[#a1a1aa]">
+                            {m.dimensions}d
+                          </span>
+                        </button>
+                      );
+                    })}
+
+                    <div className="flex items-center justify-between pt-1 text-[11px] text-[#8a8a8f]">
+                      <span className="truncate">
+                        {embeddingDetail ||
+                          'Dimension-isolated semantic vector store'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void checkEmbeddingsConnection()}
+                        className="shrink-0 rounded-md border border-white/[0.1] bg-white/[0.04] px-2 py-1 text-[11px] font-medium text-[#d4d4d8] transition-colors hover:bg-white/[0.08] hover:text-white"
+                      >
+                        Test Connection
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* 2. Moderation Collapsible Box */}
+              <div className="overflow-hidden rounded-xl border border-white/[0.09] bg-white/[0.02]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setModelsOpenBox((prev) =>
+                      prev === 'moderation' ? null : 'moderation',
+                    )
+                  }
+                  className="flex w-full min-w-0 items-center justify-between gap-3 px-4 py-3.5 text-left transition-colors hover:bg-white/[0.03]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13.5px] font-medium text-white">
+                        Moderation
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+                          !settings.moderationEnabled
+                            ? 'border-white/10 bg-white/5 text-[#8a8a8f]'
+                            : moderationStatus === 'connected'
+                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                              : 'border-[#b39dff]/30 bg-[#b39dff]/10 text-[#d8c8ff]'
+                        }`}
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            !settings.moderationEnabled
+                              ? 'bg-[#6f6f76]'
+                              : moderationStatus === 'connected'
+                                ? 'bg-emerald-400'
+                                : 'bg-[#b39dff]'
+                          }`}
+                        />
+                        {!settings.moderationEnabled
+                          ? 'Disabled'
+                          : moderationStatus === 'connected'
+                            ? 'Active'
+                            : 'Checking…'}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a8f]">
+                      omni-moderation-latest · Multimodal text & image safety
+                    </p>
+                  </div>
+                  <ChevronRight rotated={modelsOpenBox === 'moderation'} />
+                </button>
+
+                {modelsOpenBox === 'moderation' ? (
+                  <div className="space-y-3 border-t border-white/[0.07] bg-black/20 px-4 py-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[12.5px] font-medium text-[#ededed]">
+                          Enable safety moderation
+                        </div>
+                        <div className="truncate text-[11px] text-[#8a8a8f]">
+                          Screen text and uploaded images via VoidAI
+                        </div>
+                      </div>
+                      <Switch
+                        checked={settings.moderationEnabled}
+                        label="Enable content moderation"
+                        onChange={() =>
+                          onUpdateSettings({
+                            ...settings,
+                            moderationEnabled: !settings.moderationEnabled,
+                          })
+                        }
+                      />
+                    </div>
+
+                    {MODERATION_MODEL_CATALOG.map((m) => (
+                      <div
+                        key={m.id}
+                        className="flex w-full min-w-0 items-center justify-between gap-3 rounded-lg border border-white/[0.16] bg-white/[0.04] px-3 py-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-[12.5px] font-medium text-[#ededed]">
+                              {m.name}
+                            </span>
+                            <RoleBadge role={m.role} />
+                          </div>
+                          <p className="mt-0.5 truncate text-[11px] text-[#8a8a8f]">
+                            {m.description}
+                          </p>
+                        </div>
+                        <span
+                          className={`shrink-0 text-[11px] font-medium ${
+                            settings.moderationEnabled
+                              ? 'text-emerald-400'
+                              : 'text-[#8a8a8f]'
+                          }`}
+                        >
+                          {settings.moderationEnabled ? 'Active' : 'Off'}
+                        </span>
+                      </div>
+                    ))}
+
+                    <div className="flex items-center justify-between pt-0.5 text-[11px] text-[#8a8a8f]">
+                      <span className="truncate">
+                        {moderationDetail ||
+                          'Connected to /api/moderation (omni-moderation-latest)'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void checkModerationConnection()}
+                        className="shrink-0 rounded-md border border-white/[0.1] bg-white/[0.04] px-2 py-1 text-[11px] font-medium text-[#d4d4d8] transition-colors hover:bg-white/[0.08] hover:text-white"
+                      >
+                        Test Connection
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : (
+            /* GENERAL TAB */
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5 md:px-6">
               <div className="flex items-center justify-between gap-4">
-                <div>
+                <div className="min-w-0">
                   <div className="text-[13px] font-medium text-[#ededed]">
                     Compact chat layout
                   </div>
@@ -1104,18 +1315,18 @@ export default function SettingsModal({
               </div>
 
               <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-4">
-                <div className="text-[11px] font-medium tracking-wide text-[#6f6f76]">
-                  CONNECTED TOOLS & SPECIALIZED MODELS
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6f6f76]">
+                  Active Configuration
                 </div>
                 <div className="mt-3 flex flex-wrap gap-1.5">
                   {[
                     'VOID Combo',
-                    'MIRASH OpenRouter',
-                    'Web search',
+                    'OmniRoute Image Gen',
+                    'Web Search',
                     `Embeddings: ${settings.embeddingModel}`,
                     `TTS: ${settings.ttsModel}`,
                     `STT: ${settings.sttModel}`,
-                    'Moderation: omni-moderation-latest',
+                    `Moderation: ${settings.moderationEnabled ? 'On' : 'Off'}`,
                   ].map((tool) => (
                     <span
                       key={tool}
@@ -1129,7 +1340,7 @@ export default function SettingsModal({
               </div>
 
               <div className="flex items-center justify-between gap-4 border-t border-white/[0.07] pt-4">
-                <div>
+                <div className="min-w-0">
                   <div className="text-[13px] font-medium text-[#ededed]">
                     Clear all chats
                   </div>

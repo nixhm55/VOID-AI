@@ -1,15 +1,18 @@
 import {
   VOIDAI_OPENAI_STT_MODELS,
   type VoidAiOpenAiSttModel,
+  resolveOmniApiKeys,
+  resolveOmniBaseUrl,
   resolveVoidAiApiKey,
   resolveVoidAiBaseUrl,
 } from './config.js';
 
 /**
- * Ultra-Fast (<50ms) Trilingual Speech-to-Script Converter (Primary Engine)
- * + VoidAI OpenAI Audio Transcription (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1`)
- * Supports automatic language detection across Malayalam (മലയാളം), Hindi (हिन्दी), English, and more
- * without forced translation into English.
+ * Ultra-Fast (<50ms) Trilingual Speech-to-Script Converter
+ * + VoidAI & OmniRoute Audio Transcription (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1`)
+ * Supports both:
+ * 1. `default` mode (explicit EN / ML / HI language selector button in PromptBar)
+ * 2. Auto-detect mode (`gemini`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`)
  */
 
 const DISALLOWED_SCRIPT_REGEX =
@@ -134,12 +137,19 @@ const HINDI_ROMAN_REGEX =
 export function detectSpokenLanguage(
   hint: string,
   preferredLang = 'en',
+  autoDetect = true,
 ): 'en' | 'ml' | 'hi' {
   const cleaned = hint.toLowerCase().trim();
   if (!cleaned) return 'en';
 
-  // Automatic spoken-language detection takes precedence so users never have to
-  // manually switch languages before speaking Malayalam, Hindi, or English!
+  // When running in Default (manual button) mode, respect the explicitly chosen button ('en', 'ml', 'hi')
+  if (!autoDetect) {
+    if (preferredLang === 'ml' || preferredLang === 'ml-in') return 'ml';
+    if (preferredLang === 'hi' || preferredLang === 'hi-in') return 'hi';
+    return 'en';
+  }
+
+  // Automatic spoken-language detection mode
   if (MALAYALAM_ROMAN_REGEX.test(cleaned)) return 'ml';
   if (HINDI_ROMAN_REGEX.test(cleaned)) return 'hi';
 
@@ -174,7 +184,7 @@ async function googleInputToolsTransliterate(
 ): Promise<string> {
   const itc = targetLang === 'ml' ? 'ml-t-i0-und' : 'hi-t-i0-und';
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 800);
+  const timer = setTimeout(() => controller.abort(), 900);
 
   try {
     const url = `https://inputtools.google.com/request?text=${encodeURIComponent(text)}&itc=${itc}&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
@@ -203,20 +213,29 @@ async function googleInputToolsTransliterate(
 export async function convertSpokenHintFast(options: {
   hint: string;
   lang?: string;
+  autoDetect?: boolean;
 }): Promise<string> {
   let text = cleanTrilingualText(options.hint);
   if (!text) return '';
 
-  for (const [pattern, replacement] of INSTANT_PHRASE_MAP) {
-    text = text.replace(pattern, replacement);
+  const isAuto = options.autoDetect !== false && options.lang !== 'en-strict';
+
+  if (isAuto || options.lang === 'ml' || options.lang === 'hi') {
+    for (const [pattern, replacement] of INSTANT_PHRASE_MAP) {
+      text = text.replace(pattern, replacement);
+    }
+    text = collapseDuplicateSpeech(text);
   }
-  text = collapseDuplicateSpeech(text);
 
   if (!/[a-zA-Z]/.test(text)) {
     return text;
   }
 
-  const targetLang = detectSpokenLanguage(text, options.lang || 'en');
+  const targetLang = detectSpokenLanguage(
+    text,
+    options.lang || 'en',
+    isAuto,
+  );
   if (targetLang === 'en') {
     return collapseDuplicateSpeech(text);
   }
@@ -260,35 +279,26 @@ export interface AudioTranscriptionResult {
 
 /**
  * Transcribes spoken audio via VoidAI (`POST https://api.voidai.app/v1/audio/transcriptions`)
+ * and OmniRoute (`POST https://omniroute-server-production-eea0.up.railway.app/v1/audio/transcriptions`)
  * with automatic fallback across:
  * 1. `gpt-4o-transcribe`
  * 2. `gpt-4o-mini-transcribe`
  * 3. `whisper-1`
- *
- * Preserves the original spoken language (Malayalam, Hindi, English, etc.) without
- * translating non-English speech into English.
  */
 export async function transcribeAudioViaVoidAi(
   options: AudioTranscriptionRequest,
 ): Promise<AudioTranscriptionResult> {
-  const baseUrl = resolveVoidAiBaseUrl(options.voidAiBaseUrl);
-  const apiKey = resolveVoidAiApiKey(options.voidAiApiKey);
-
-  if (!apiKey) {
-    throw new Error(
-      'VOIDAI_API_KEY is not configured in the server environment (.env).',
-    );
-  }
+  const voidBaseUrl = resolveVoidAiBaseUrl(options.voidAiBaseUrl);
+  const voidApiKey = resolveVoidAiApiKey(options.voidAiApiKey);
+  const omniBaseUrl = resolveOmniBaseUrl();
+  const omniKeys = resolveOmniApiKeys();
 
   if (!options.audioBytes || options.audioBytes.byteLength === 0) {
     throw new Error('Audio payload is empty.');
   }
 
-  const endpoint = `${baseUrl}/audio/transcriptions`;
   const chain = getOpenAiTranscriptionFallbackChain(options.preferredModel);
   const requestedFirst = chain[0];
-  // Strip codec parameters like `;codecs=opus` because OpenAI / VoidAI multipart
-  // parser requires clean MIME types (`audio/webm`, `audio/mp4`, `audio/wav`, `audio/mpeg`).
   const cleanMimeType =
     (options.mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
   const fileName =
@@ -303,71 +313,85 @@ export async function transcribeAudioViaVoidAi(
             ? 'speech.ogg'
             : 'speech.webm');
 
-  // Optional language hint only when explicitly specified as 'ml' or 'hi';
-  // when unset or 'auto'/'en' (default), let the model auto-detect Malayalam, Hindi, or English!
   const explicitIsoLang =
     options.language === 'ml' || options.language === 'ml-in'
       ? 'ml'
       : options.language === 'hi' || options.language === 'hi-in'
         ? 'hi'
-        : undefined;
+        : options.language === 'en' || options.language === 'en-in'
+          ? 'en'
+          : undefined;
 
-  let lastError = 'All VoidAI transcription models failed.';
+  const endpointsToTry: Array<{ endpoint: string; apiKey: string }> = [];
+  if (voidApiKey) {
+    endpointsToTry.push({
+      endpoint: `${voidBaseUrl}/audio/transcriptions`,
+      apiKey: voidApiKey,
+    });
+  }
+  for (const omniKey of omniKeys) {
+    endpointsToTry.push({
+      endpoint: `${omniBaseUrl}/audio/transcriptions`,
+      apiKey: omniKey,
+    });
+  }
 
-  for (const candidateModel of chain) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 18000);
+  let lastError = 'All transcription models failed.';
 
-    try {
-      const formData = new FormData();
-      const blob = new Blob([options.audioBytes], { type: cleanMimeType });
-      formData.append('file', blob, fileName);
-      formData.append('model', candidateModel);
-      formData.append('response_format', 'json');
-      // Prompt instructs the transcription engine to transcribe in the original spoken
-      // language/script (Malayalam മലയാളം, Hindi हिन्दी, or English) and never translate.
-      formData.append(
-        'prompt',
-        'Transcribe verbatim in the original spoken language and native script (English, മലയാളം, हिन्दी). Do not translate.',
-      );
-      if (explicitIsoLang) {
-        formData.append('language', explicitIsoLang);
+  for (const { endpoint, apiKey } of endpointsToTry) {
+    for (const candidateModel of chain) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 14000);
+
+      try {
+        const formData = new FormData();
+        const blob = new Blob([options.audioBytes], { type: cleanMimeType });
+        formData.append('file', blob, fileName);
+        formData.append('model', candidateModel);
+        formData.append('response_format', 'json');
+        formData.append(
+          'prompt',
+          'Transcribe verbatim in the original spoken language and native script (English, മലയാളം, हिन्दी). Do not translate.',
+        );
+        if (explicitIsoLang) {
+          formData.append('language', explicitIsoLang);
+        }
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: formData,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timer);
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => res.statusText);
+          lastError = `STT (${candidateModel}) HTTP ${res.status}: ${errText.slice(0, 180)}`;
+          continue;
+        }
+
+        const data = (await res.json()) as Record<string, unknown>;
+        const rawText = String(data.text ?? '').trim();
+        const cleaned = collapseDuplicateSpeech(rawText);
+        if (cleaned) {
+          return {
+            text: cleaned,
+            usedModel: candidateModel,
+            fallbackUsed: candidateModel !== requestedFirst,
+          };
+        }
+        lastError = `STT (${candidateModel}) returned empty transcript.`;
+      } catch (err) {
+        clearTimeout(timer);
+        lastError =
+          err instanceof Error
+            ? err.message
+            : `STT (${candidateModel}) failed`;
       }
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: formData,
-        signal: controller.signal,
-      });
-
-      clearTimeout(timer);
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => res.statusText);
-        lastError = `VoidAI STT (${candidateModel}) HTTP ${res.status}: ${errText.slice(0, 200)}`;
-        continue;
-      }
-
-      const data = (await res.json()) as Record<string, unknown>;
-      const rawText = String(data.text ?? '').trim();
-      const cleaned = collapseDuplicateSpeech(rawText);
-      if (cleaned) {
-        return {
-          text: cleaned,
-          usedModel: candidateModel,
-          fallbackUsed: candidateModel !== requestedFirst,
-        };
-      }
-      lastError = `VoidAI STT (${candidateModel}) returned empty transcript.`;
-    } catch (err) {
-      clearTimeout(timer);
-      lastError =
-        err instanceof Error
-          ? err.message
-          : `VoidAI STT (${candidateModel}) failed`;
     }
   }
 

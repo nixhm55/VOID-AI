@@ -11,6 +11,7 @@ export { normalizeVoidIdentity };
 export interface StreamChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  imageUrls?: string[];
 }
 
 export interface StreamChatOptions {
@@ -19,6 +20,7 @@ export interface StreamChatOptions {
   effort?: string;
   embeddingModel?: VoidAiEmbeddingModel;
   moderationEnabled?: boolean;
+  imageUrls?: string[];
   signal?: AbortSignal;
   onChunk: (deltaText: string, fullText: string) => void;
 }
@@ -29,6 +31,7 @@ export async function streamChatCompletion({
   effort = 'High',
   embeddingModel = 'text-embedding-3-large',
   moderationEnabled = true,
+  imageUrls,
   signal,
   onChunk,
 }: StreamChatOptions): Promise<string> {
@@ -50,7 +53,7 @@ export async function streamChatCompletion({
     normalizedModel === 'mirash' ? 'MIRASH' : 'VOID';
   const lastUserMsg = [...messages]
     .reverse()
-    .find((m) => m.role === 'user' && m.content);
+    .find((m) => m.role === 'user');
   const lastUserText = lastUserMsg?.content ?? '';
   const isIdentityReply = isModelIdentityQuery(lastUserText);
   const unlockedByNix = hasNixUnlockKey(lastUserText);
@@ -66,6 +69,7 @@ export async function streamChatCompletion({
       effort: effort || 'High',
       embeddingModel,
       moderationEnabled,
+      imageUrls,
     }),
     signal,
   });

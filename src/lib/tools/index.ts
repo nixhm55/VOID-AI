@@ -5,3 +5,4 @@ export * from './text_to_speech.js';
 export * from './speech_transcriber.js';
 export * from './embeddings.js';
 export * from './moderation.js';
+export * from './image_generator.js';

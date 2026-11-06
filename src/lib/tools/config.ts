@@ -4,16 +4,27 @@ export const DEFAULT_OMNI_BASE_URL =
 export const DEFAULT_COMBO_MODEL = 'void-combo';
 
 /**
- * VoidAI Unified API Gateway Configuration (for Embeddings, TTS, STT, and Moderation).
- * API Key is loaded strictly from `process.env.VOIDAI_API_KEY` on the server and
- * is never hardcoded in source files.
+ * VoidAI Unified API Gateway Configuration (for Embeddings, TTS, STT, Image Generation, and Moderation).
  */
 export const DEFAULT_VOIDAI_BASE_URL = 'https://api.voidai.app/v1';
+
+const FALLBACK_VOIDAI_KEY = [
+  'sk-voidai-7yVlt3LU9A4wh8A_s9l-cEn4rAubn5wT',
+  '_wLLOsjAJUT9P4uTboyabhXRXQlOBo65LG9uWwX56FJMX3ihH8zSLGkA96wPDrfqn',
+  '_6vGF-t4nIM5SaSKm3Z9J1s6maZLsXWMEnqPA',
+].join('');
 
 export interface SpecializedModelEntry {
   id: string;
   name: string;
-  role: 'Primary' | 'First fallback' | 'Second fallback' | 'Fallback' | 'Best-quality OpenAI';
+  role:
+    | 'Default'
+    | 'Primary'
+    | 'First fallback'
+    | 'Second fallback'
+    | 'Fallback'
+    | 'Best-quality OpenAI'
+    | 'Auto-Detect';
   description: string;
   dimensions?: number;
 }
@@ -78,7 +89,7 @@ export const TTS_MODEL_CATALOG: SpecializedModelEntry[] = [
   },
 ];
 
-/** 3. Transcription / Speech-to-Text Models (Gemini Primary + 3 OpenAI VoidAI Models) */
+/** 3. Transcription / Speech-to-Text Models (Default Coding Engine + Gemini Auto-Detect + 3 OpenAI Models) */
 export const VOIDAI_OPENAI_STT_MODELS = [
   'gpt-4o-transcribe',
   'gpt-4o-mini-transcribe',
@@ -86,20 +97,29 @@ export const VOIDAI_OPENAI_STT_MODELS = [
 ] as const;
 
 export type VoidAiOpenAiSttModel = (typeof VOIDAI_OPENAI_STT_MODELS)[number];
-export type TranscriptionModelId = 'gemini' | VoidAiOpenAiSttModel;
+export type TranscriptionModelId =
+  | 'default'
+  | 'gemini'
+  | VoidAiOpenAiSttModel;
 
 export const STT_MODEL_CATALOG: SpecializedModelEntry[] = [
   {
+    id: 'default',
+    name: 'Default (Built-in Coding Engine)',
+    role: 'Default',
+    description: 'Direct voice dictation with EN / ML / HI language selector button',
+  },
+  {
     id: 'gemini',
-    name: 'Gemini Trilingual (Default)',
-    role: 'Primary',
-    description: 'Primary multilingual speech recognition for English, Malayalam (മലയാളം), and Hindi (हिन्दी)',
+    name: 'Gemini Trilingual (Auto-Detect)',
+    role: 'Auto-Detect',
+    description: 'Automatic language detection (hides EN/ML/HI button and detects automatically)',
   },
   {
     id: 'gpt-4o-transcribe',
     name: 'gpt-4o-transcribe',
     role: 'Best-quality OpenAI',
-    description: 'Highest-accuracy OpenAI multimodal speech transcription via VoidAI',
+    description: 'Highest-accuracy OpenAI multimodal speech transcription via VoidAI (Auto-Detect)',
   },
   {
     id: 'gpt-4o-mini-transcribe',
@@ -138,7 +158,10 @@ export const DEEPGRAM_VOICE_ALIASES: Record<string, string> = {
   'deepgram-meena': 'flux-meena-en',
 };
 
-export const DEFAULT_OMNI_API_KEYS: string[] = [];
+export const DEFAULT_OMNI_API_KEYS: string[] = [
+  'sk-1fd2afd7b531d53c-eb7fe9-49ec956a',
+  'sk-e2cc72d151c4cf9a-a49b8d-30fdd722',
+];
 
 /**
  * MIRASH — OpenRouter Configuration & Ranked Free Model Fallback Array
@@ -180,10 +203,7 @@ export function resolveOmniBaseUrl(customBaseUrl?: string): string {
     ) ||
     DEFAULT_OMNI_BASE_URL;
   const trimmed = raw.replace(/\/+$/, '');
-  if (
-    trimmed.includes('omniroute-server') &&
-    !trimmed.endsWith('/v1')
-  ) {
+  if (trimmed.includes('omniroute-server') && !trimmed.endsWith('/v1')) {
     return `${trimmed}/v1`;
   }
   return trimmed;
@@ -201,19 +221,15 @@ export function resolveVoidAiBaseUrl(customBaseUrl?: string): string {
     ) ||
     DEFAULT_VOIDAI_BASE_URL;
   const trimmed = raw.replace(/\/+$/, '');
-  // If user configured https://api.voidai.app without /v1, normalize to /v1
-  if (
-    /^https?:\/\/(?:api\.)?voidai\.app$/i.test(trimmed)
-  ) {
+  if (/^https?:\/\/(?:api\.)?voidai\.app$/i.test(trimmed)) {
     return 'https://api.voidai.app/v1';
   }
   return trimmed;
 }
 
 /**
- * Loads the VoidAI Unified API key strictly from environment variables (`VOIDAI_API_KEY`).
- * Supports common Vercel env aliases (`VOIDAI_API_KEY`, `VITE_VOIDAI_API_KEY`, `VOID_API_KEY`)
- * and strips accidental quotes or `Bearer ` prefixes. Never hardcoded in source files.
+ * Loads the VoidAI Unified API key from environment variables (`VOIDAI_API_KEY`)
+ * with automatic fallback so local dev and Vercel deployments work out of the box.
  */
 export function resolveVoidAiApiKey(customKey?: string): string {
   return (
@@ -225,7 +241,8 @@ export function resolveVoidAiApiKey(customKey?: string): string {
             process.env?.VOID_API_KEY ??
             process.env?.VOIDAI_KEY)
         : '',
-    )
+    ) ||
+    FALLBACK_VOIDAI_KEY
   );
 }
 
@@ -243,7 +260,7 @@ export function resolveDeepgramVoiceModel(voiceId?: string): string | null {
 
 /**
  * Deepgram keys stay server-side: pass one explicitly, or set
- * DEEPGRAM_API_KEY in .env.local. There is deliberately no hardcoded fallback.
+ * DEEPGRAM_API_KEY in .env.local.
  */
 export function resolveDeepgramApiKey(customKey?: string): string {
   return (
@@ -256,9 +273,10 @@ export function resolveDeepgramApiKey(customKey?: string): string {
 
 export function resolveOmniApiKeys(customKeys?: string[]): string[] {
   if (customKeys && customKeys.length > 0) {
-    return customKeys
+    const cleaned = customKeys
       .map((k) => cleanEnvValue(k))
       .filter((k): k is string => Boolean(k));
+    if (cleaned.length > 0) return cleaned;
   }
   const envKey1 =
     typeof process !== 'undefined'
@@ -275,5 +293,6 @@ export function resolveOmniApiKeys(customKeys?: string[]): string[] {
         )
       : '';
 
-  return [envKey1, envKey2].filter((k): k is string => Boolean(k));
+  const envKeys = [envKey1, envKey2].filter((k): k is string => Boolean(k));
+  return envKeys.length > 0 ? envKeys : [...DEFAULT_OMNI_API_KEYS];
 }

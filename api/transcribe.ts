@@ -39,7 +39,8 @@ async function post(req: Request): Promise<Response> {
           audioBytes,
           mimeType,
           preferredModel,
-          language: language || undefined,
+          language:
+            language && language !== 'auto' ? language : undefined,
         });
 
         return Response.json(
@@ -59,14 +60,17 @@ async function post(req: Request): Promise<Response> {
     }
 
     const body = (await req.json()) as Record<string, unknown>;
+    const requestedModel = String(body.model ?? 'default').trim();
+    const isDefaultManualMode = requestedModel === 'default';
 
     // 2. Base64 audio payload for OpenAI / VoidAI STT (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1`)
     if (typeof body.audioBase64 === 'string' && body.audioBase64.trim()) {
       const audioBytes = decodeBase64Audio(body.audioBase64);
       const mimeType = String(body.mimeType ?? 'audio/webm').trim();
-      const preferredModel = String(
-        body.model ?? 'gpt-4o-transcribe',
-      ).trim();
+      const preferredModel =
+        requestedModel === 'gemini' || requestedModel === 'default'
+          ? 'gpt-4o-transcribe'
+          : requestedModel;
       const lang = String(body.lang ?? body.language ?? '')
         .trim()
         .toLowerCase();
@@ -76,7 +80,12 @@ async function post(req: Request): Promise<Response> {
           audioBytes,
           mimeType,
           preferredModel,
-          language: lang && lang !== 'auto' && lang !== 'en' ? lang : undefined,
+          language:
+            isDefaultManualMode && lang && lang !== 'auto'
+              ? lang
+              : lang === 'ml' || lang === 'hi'
+                ? lang
+                : undefined,
         });
 
         return Response.json(
@@ -93,17 +102,17 @@ async function post(req: Request): Promise<Response> {
           },
         );
       } catch (audioErr) {
-        // If a spoken hint was also provided alongside audio, fall back to primary Gemini/trilingual hint engine
         const fallbackHint = cleanTrilingualText(String(body.hint ?? ''));
         if (fallbackHint) {
           const fallbackText = await convertSpokenHintFast({
             hint: fallbackHint,
             lang,
+            autoDetect: !isDefaultManualMode,
           });
           return Response.json(
             {
               text: fallbackText || fallbackHint,
-              model: 'gemini',
+              model: requestedModel,
               fallbackUsed: true,
             },
             {
@@ -115,23 +124,27 @@ async function post(req: Request): Promise<Response> {
       }
     }
 
-    // 3. Primary default engine: Gemini / Trilingual Spoken Hint Conversion (Malayalam, Hindi, English)
+    // 3. Spoken Hint Conversion (supports both Default EN/ML/HI mode and Gemini Auto-Detect mode)
     const hint = cleanTrilingualText(String(body.hint ?? ''));
     const lang = String(body.lang ?? 'en').trim().toLowerCase();
     if (!hint) {
       return Response.json(
-        { text: '', model: String(body.model ?? 'gemini') },
+        { text: '', model: requestedModel },
         {
           headers: { 'Cache-Control': 'private, no-store' },
         },
       );
     }
 
-    const text = await convertSpokenHintFast({ hint, lang });
+    const text = await convertSpokenHintFast({
+      hint,
+      lang,
+      autoDetect: !isDefaultManualMode,
+    });
     return Response.json(
       {
         text: text || hint,
-        model: String(body.model ?? 'gemini'),
+        model: requestedModel,
         fallbackUsed: false,
       },
       {

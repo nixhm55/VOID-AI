@@ -5,11 +5,19 @@ import {
   type VoidAiTtsModel,
 } from './tools/index';
 
+export interface ChatAttachment {
+  name: string;
+  type: string;
+  dataUrl?: string;
+}
+
+export type ChatAttachmentItem = string | ChatAttachment;
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  attachments?: string[];
+  attachments?: ChatAttachmentItem[];
   createdAt?: number;
 }
 
@@ -163,7 +171,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   ttsVoice: 'coral',
   ttsModel: 'gpt-4o-mini-tts',
   ttsSpeed: 1.0,
-  sttModel: 'gemini',
+  sttModel: 'default',
   embeddingModel: 'text-embedding-3-large',
   moderationModel: 'omni-moderation-latest',
   moderationEnabled: true,
@@ -226,6 +234,7 @@ export function loadUserSettings(): UserSettings {
       'tts-1',
     ];
     const validSttModels: TranscriptionModelId[] = [
+      'default',
       'gemini',
       'gpt-4o-transcribe',
       'gpt-4o-mini-transcribe',
@@ -236,7 +245,6 @@ export function loadUserSettings(): UserSettings {
       'text-embedding-3-small',
     ];
 
-    // Migrate old default `flux-meena-en` to `coral` so VoidAI GPT Speech works immediately
     const resolvedVoice =
       typeof parsed.ttsVoice === 'string' &&
       parsed.ttsVoice !== 'flux-meena-en' &&

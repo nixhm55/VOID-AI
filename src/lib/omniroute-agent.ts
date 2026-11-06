@@ -6,6 +6,8 @@ import {
   OPENROUTER_ENDPOINT,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
+  resolveVoidAiApiKey,
+  resolveVoidAiBaseUrl,
 } from './tools/config.js';
 import {
   VOID_SYSTEM_PROMPT,
@@ -26,6 +28,11 @@ import {
   isRealtimeRefusalResponse,
   shouldTriggerWebSearch,
 } from './tools/search_engine.js';
+import {
+  extractImageGenerationPrompt,
+  generateImageViaOmniRoute,
+  shouldTriggerImageGeneration,
+} from './tools/image_generator.js';
 
 export {
   AI_MODELS,
@@ -49,6 +56,12 @@ export {
 };
 export type { OmniSearchResponse, OmniSearchResultItem };
 
+export type MultimodalContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export type ChatMessageContent = string | MultimodalContentPart[];
+
 export interface EffortConfiguration {
   level: 'low' | 'medium' | 'high' | 'extra' | 'max';
   reasoningEffort: 'low' | 'medium' | 'high';
@@ -57,11 +70,6 @@ export interface EffortConfiguration {
   systemDirective: string;
 }
 
-/**
- * Maps the UI Effort selector (Low, Medium, High, Extra, Max) to concrete
- * upstream generation parameters (`reasoning_effort`, `temperature`, `max_tokens`)
- * and system-level reasoning instructions.
- */
 export function resolveEffortConfiguration(effort?: string): EffortConfiguration {
   const raw = (effort ?? 'High').trim().toLowerCase();
 
@@ -173,7 +181,7 @@ export async function callMirashOpenRouterStep(options: {
   effort?: string;
   omniEndpoint: string;
   omniApiKeys: string[];
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: string; content: ChatMessageContent }>;
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
 }): Promise<{
@@ -200,77 +208,8 @@ export async function callMirashOpenRouterStep(options: {
 
   const orderedCandidateModels = [...AI_MODELS, 'openrouter/free'];
 
-  for (const model of orderedCandidateModels) {
-    if (signal?.aborted) {
-      return {
-        ok: false,
-        status: 499,
-        errorText: 'Request aborted by client.',
-        contentText: '',
-        toolCalls: [],
-      };
-    }
-
-    const { controller, cleanup } = linkAbortSignals(signal, 9500);
-
-    try {
-      const res = await fetch(OPENROUTER_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${openRouterApiKey}`,
-          'HTTP-Referer': 'http://localhost:5173',
-          'X-Title': 'MIRASH AI',
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: effortConfig.temperature,
-          max_tokens: effortConfig.maxTokens,
-          reasoning: { effort: effortConfig.reasoningEffort },
-          stream: true,
-        }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok || !res.body) {
-        lastStatus = res.status;
-        lastErrorText = await res.text().catch(() => res.statusText);
-        cleanup();
-        continue;
-      }
-
-      const parsed = await consumeUpstreamStream(
-        res.body,
-        onTextDelta,
-        controller.signal,
-      );
-      cleanup();
-
-      if (signal?.aborted) {
-        return {
-          ok: false,
-          status: 499,
-          errorText: 'Request aborted by client.',
-          contentText: parsed.contentText,
-          toolCalls: [],
-        };
-      }
-
-      if (parsed.contentText.trim().length > 0 || parsed.toolCalls.length > 0) {
-        return {
-          ok: true,
-          status: 200,
-          errorText: '',
-          contentText: parsed.contentText,
-          toolCalls: parsed.toolCalls,
-          usedModel: parsed.detectedModel || model,
-        };
-      }
-
-      lastErrorText = `Model ${model} returned an empty response.`;
-    } catch (err) {
-      cleanup();
+  if (openRouterApiKey) {
+    for (const model of orderedCandidateModels) {
       if (signal?.aborted) {
         return {
           ok: false,
@@ -280,8 +219,79 @@ export async function callMirashOpenRouterStep(options: {
           toolCalls: [],
         };
       }
-      lastErrorText =
-        err instanceof Error ? err.message : `Model ${model} failed`;
+
+      const { controller, cleanup } = linkAbortSignals(signal, 9500);
+
+      try {
+        const res = await fetch(OPENROUTER_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${openRouterApiKey}`,
+            'HTTP-Referer': 'http://localhost:5173',
+            'X-Title': 'MIRASH AI',
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: effortConfig.temperature,
+            max_tokens: effortConfig.maxTokens,
+            reasoning: { effort: effortConfig.reasoningEffort },
+            stream: true,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          lastStatus = res.status;
+          lastErrorText = await res.text().catch(() => res.statusText);
+          cleanup();
+          continue;
+        }
+
+        const parsed = await consumeUpstreamStream(
+          res.body,
+          onTextDelta,
+          controller.signal,
+        );
+        cleanup();
+
+        if (signal?.aborted) {
+          return {
+            ok: false,
+            status: 499,
+            errorText: 'Request aborted by client.',
+            contentText: parsed.contentText,
+            toolCalls: [],
+          };
+        }
+
+        if (parsed.contentText.trim().length > 0 || parsed.toolCalls.length > 0) {
+          return {
+            ok: true,
+            status: 200,
+            errorText: '',
+            contentText: parsed.contentText,
+            toolCalls: parsed.toolCalls,
+            usedModel: parsed.detectedModel || model,
+          };
+        }
+
+        lastErrorText = `Model ${model} returned an empty response.`;
+      } catch (err) {
+        cleanup();
+        if (signal?.aborted) {
+          return {
+            ok: false,
+            status: 499,
+            errorText: 'Request aborted by client.',
+            contentText: '',
+            toolCalls: [],
+          };
+        }
+        lastErrorText =
+          err instanceof Error ? err.message : `Model ${model} failed`;
+      }
     }
   }
 
@@ -316,7 +326,7 @@ async function callOmniRouteChatStep(options: {
   endpoint: string;
   apiKeys: string[];
   model: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: string; content: ChatMessageContent }>;
   enableTools?: boolean;
   effort?: string;
   signal?: AbortSignal;
@@ -344,7 +354,44 @@ async function callOmniRouteChatStep(options: {
   let lastStatus = 502;
   let lastErrorText = '';
 
+  const hasMultimodalImages = messages.some((m) => Array.isArray(m.content));
+  const voidAiKey = resolveVoidAiApiKey();
+  const voidAiEndpoint = `${resolveVoidAiBaseUrl()}/chat/completions`;
+
+  // Build candidate upstream targets:
+  // If multimodal images are present, include VoidAI gpt-4o first/alongside OmniRoute
+  // so vision analysis works seamlessly.
+  const candidates: Array<{
+    targetEndpoint: string;
+    apiKey: string;
+    targetModel: string;
+  }> = [];
+
+  if (hasMultimodalImages && voidAiKey) {
+    candidates.push({
+      targetEndpoint: voidAiEndpoint,
+      apiKey: voidAiKey,
+      targetModel: 'gpt-4o',
+    });
+  }
+
   for (const apiKey of apiKeys) {
+    candidates.push({
+      targetEndpoint: endpoint,
+      apiKey,
+      targetModel: model,
+    });
+  }
+
+  if (!hasMultimodalImages && voidAiKey) {
+    candidates.push({
+      targetEndpoint: voidAiEndpoint,
+      apiKey: voidAiKey,
+      targetModel: 'gpt-4o',
+    });
+  }
+
+  for (const candidate of candidates) {
     if (signal?.aborted) {
       return {
         ok: false,
@@ -355,16 +402,14 @@ async function callOmniRouteChatStep(options: {
       };
     }
 
-    // Try with full effort parameters (`reasoning_effort`, `temperature`, `max_tokens`),
-    // and automatically retry without `reasoning_effort` if an upstream model rejects that key.
-    for (const includeReasoningEffort of [true, false]) {
+    for (const includeReasoningEffort of [false, true]) {
       if (signal?.aborted) break;
 
       const { controller, cleanup } = linkAbortSignals(signal);
 
       try {
         const payload: Record<string, unknown> = {
-          model,
+          model: candidate.targetModel,
           messages,
           temperature: effortConfig.temperature,
           max_tokens: effortConfig.maxTokens,
@@ -375,16 +420,16 @@ async function callOmniRouteChatStep(options: {
           payload.reasoning_effort = effortConfig.reasoningEffort;
         }
 
-        if (enableTools) {
+        if (enableTools && !hasMultimodalImages) {
           payload.tools = [WEB_SEARCH_TOOL_DEFINITION];
           payload.tool_choice = 'auto';
         }
 
-        const res = await fetch(endpoint, {
+        const res = await fetch(candidate.targetEndpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${candidate.apiKey}`,
           },
           body: JSON.stringify(payload),
           signal: controller.signal,
@@ -394,7 +439,6 @@ async function callOmniRouteChatStep(options: {
           lastStatus = res.status;
           lastErrorText = await res.text().catch(() => res.statusText);
           cleanup();
-          // If 400/422 due to unsupported `reasoning_effort`, retry once without it
           if (
             includeReasoningEffort &&
             (res.status === 400 || res.status === 422)
@@ -431,7 +475,7 @@ async function callOmniRouteChatStep(options: {
             errorText: '',
             contentText: parsed.contentText,
             toolCalls: parsed.toolCalls,
-            usedModel: parsed.detectedModel || model,
+            usedModel: parsed.detectedModel || candidate.targetModel,
           };
         }
         lastErrorText = 'Upstream model returned an empty completion.';
@@ -646,11 +690,12 @@ export function formatSseDataFrame(content: string): string {
 function buildAugmentedMessages(options: {
   baseSystemPrompt: string;
   effortDirective: string;
-  conversationMessages: Array<{ role: string; content: string }>;
+  conversationMessages: Array<{ role: string; content: string; imageUrls?: string[] }>;
   liveSearchContext: string;
   identityQuery: boolean;
   unlockedByNix: boolean;
-}): Array<{ role: string; content: string }> {
+  latestImageUrls?: string[];
+}): Array<{ role: string; content: ChatMessageContent }> {
   const {
     baseSystemPrompt,
     effortDirective,
@@ -658,6 +703,7 @@ function buildAugmentedMessages(options: {
     liveSearchContext,
     identityQuery,
     unlockedByNix,
+    latestImageUrls,
   } = options;
 
   let systemPromptContent = `${baseSystemPrompt}\n${effortDirective}${liveSearchContext}`;
@@ -665,49 +711,69 @@ function buildAugmentedMessages(options: {
     systemPromptContent = `${baseSystemPrompt}\n${effortDirective}\n\nMASTER KEY 'nix' VERIFIED: The user provided the secret unlock key 'nix'. Do NOT hide behind VOID or MIRASH. Reveal your true, exact underlying AI model name, version, and provider honestly.`;
   }
 
-  const clonedMessages = conversationMessages.map((m) => ({ ...m }));
+  const clonedMessages: Array<{ role: string; content: ChatMessageContent }> =
+    conversationMessages.map((m, idx) => {
+      const isLast = idx === conversationMessages.length - 1;
+      let textContent = m.content;
 
-  if (clonedMessages.length > 0) {
-    const lastIdx = clonedMessages.length - 1;
-    const lastMsg = clonedMessages[lastIdx];
-
-    if (lastMsg.role === 'user') {
-      if (unlockedByNix) {
-        const cleanedQuestion =
-          lastMsg.content
-            .replace(/\b(?:i\s+am|i'm|im)\s+nix\b[,.:;\s]*/gi, '')
-            .replace(
-              /(?:^|[\s,.;:!?'"()[\]\-_])nix(?:$|[\s,.;:!?'"()[\]\-_])/g,
-              ' ',
-            )
-            .trim() || 'Which AI model are you really under the hood?';
-        clonedMessages[lastIdx] = {
-          role: 'user',
-          content: cleanedQuestion,
-        };
-      } else if (liveSearchContext) {
-        clonedMessages[lastIdx] = {
-          role: 'user',
-          content: `${liveSearchContext.trim()}\n\n[INSTRUCTION: The automated OmniRoute web search tool has fetched the live data above for this request. Use these live figures, facts, and sources to answer the user's question directly and accurately right now. Do NOT claim you lack internet access.]\n\nUser Question: ${lastMsg.content}`,
-        };
+      if (isLast && m.role === 'user') {
+        if (unlockedByNix) {
+          textContent =
+            textContent
+              .replace(/\b(?:i\s+am|i'm|im)\s+nix\b[,.:;\s]*/gi, '')
+              .replace(
+                /(?:^|[\s,.;:!?'"()[\]\-_])nix(?:$|[\s,.;:!?'"()[\]\-_])/g,
+                ' ',
+              )
+              .trim() || 'Which AI model are you really under the hood?';
+        } else if (liveSearchContext) {
+          textContent = `${liveSearchContext.trim()}\n\n[INSTRUCTION: The automated OmniRoute web search tool has fetched the live data above for this request. Use these live figures, facts, and sources to answer the user's question directly and accurately right now. Do NOT claim you lack internet access.]\n\nUser Question: ${textContent}`;
+        }
       }
-    }
-  }
+
+      const imgs =
+        m.imageUrls && m.imageUrls.length > 0
+          ? m.imageUrls
+          : isLast && m.role === 'user' && latestImageUrls && latestImageUrls.length > 0
+            ? latestImageUrls
+            : [];
+
+      if (m.role === 'user' && imgs.length > 0) {
+        const parts: MultimodalContentPart[] = [
+          {
+            type: 'text',
+            text: textContent || 'Please analyze this uploaded image in detail.',
+          },
+          ...imgs.map((url) => ({
+            type: 'image_url' as const,
+            image_url: { url },
+          })),
+        ];
+        return { role: 'user', content: parts };
+      }
+
+      return {
+        role: m.role,
+        content: textContent,
+      };
+    });
 
   return [{ role: 'system', content: systemPromptContent }, ...clonedMessages];
 }
 
 /**
  * Executes the full AI Agent Loop for VOID (`void-combo`) and MIRASH, with
- * automated OmniRoute Web Search, Effort level tuning, and instant AbortSignal cancellation.
+ * automated OmniRoute Web Search, OmniRoute Image Generation, Multimodal Vision,
+ * Effort level tuning, and instant AbortSignal cancellation.
  */
 export async function executeOmniRouteAgent(options: {
-  rawMessages: Array<{ role?: string; content?: string }>;
+  rawMessages: Array<{ role?: string; content?: string; imageUrls?: string[] }>;
   requestedModel?: string;
   baseUrl?: string;
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  imageUrls?: string[];
   signal?: AbortSignal;
   onSseFrame: (frame: string) => void;
 }): Promise<void> {
@@ -718,6 +784,7 @@ export async function executeOmniRouteAgent(options: {
     apiKeys,
     openRouterApiKey = OPENROUTER_API_KEY,
     effort,
+    imageUrls,
     signal,
     onSseFrame,
   } = options;
@@ -745,8 +812,11 @@ export async function executeOmniRouteAgent(options: {
 
   const lastUserObj = [...rawMessages]
     .reverse()
-    .find((m) => m && m.role === 'user' && m.content);
+    .find((m) => m && m.role === 'user');
   const lastUserRawText = String(lastUserObj?.content ?? '');
+  const hasUploadedImages =
+    (Array.isArray(imageUrls) && imageUrls.length > 0) ||
+    (Array.isArray(lastUserObj?.imageUrls) && lastUserObj.imageUrls.length > 0);
 
   const unlockedByNix = hasNixUnlockKey(lastUserRawText);
   const identityQuery = isModelIdentityQuery(lastUserRawText);
@@ -758,20 +828,58 @@ export async function executeOmniRouteAgent(options: {
     return;
   }
 
-  const baseSystemPrompt = buildSystemPrompt(personaName, unlockedByNix);
   const cleanBaseUrl = resolveOmniBaseUrl(baseUrl);
+
+  // Check if user requested to generate/create an image via OmniRoute API
+  if (
+    !hasUploadedImages &&
+    shouldTriggerImageGeneration(lastUserRawText) &&
+    !signal?.aborted
+  ) {
+    const cleanPrompt = extractImageGenerationPrompt(lastUserRawText);
+    try {
+      const generated = await generateImageViaOmniRoute({
+        prompt: cleanPrompt,
+        baseUrl: cleanBaseUrl,
+        apiKeys: resolvedKeys,
+        signal,
+      });
+      if (!signal?.aborted) {
+        const replyMarkdown = `![${cleanPrompt}](${generated.imageUrl})\n\nHere is the generated image for **"${cleanPrompt}"**.`;
+        onSseFrame(formatSseDataFrame(replyMarkdown));
+        onSseFrame('data: [DONE]\n\n');
+      }
+      return;
+    } catch (err) {
+      if (signal?.aborted) return;
+      const errMsg =
+        err instanceof Error ? err.message : 'Unable to generate image';
+      onSseFrame(formatSseDataFrame(`Image generation error: ${errMsg}`));
+      onSseFrame('data: [DONE]\n\n');
+      return;
+    }
+  }
+
+  const baseSystemPrompt = buildSystemPrompt(personaName, unlockedByNix);
   const chatEndpoint = `${cleanBaseUrl}/chat/completions`;
 
-  const conversationMessages: Array<{ role: string; content: string }> =
-    rawMessages
-      .filter((m) => m && m.role !== 'system')
-      .map((m) => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: String(m.content ?? '').replace(/@web\s*search\s*/gi, ''),
-      }));
+  const conversationMessages: Array<{
+    role: string;
+    content: string;
+    imageUrls?: string[];
+  }> = rawMessages
+    .filter((m) => m && m.role !== 'system')
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: String(m.content ?? '').replace(/@web\s*search\s*/gi, ''),
+      imageUrls: Array.isArray(m.imageUrls) ? m.imageUrls : undefined,
+    }));
 
   const preSearchNeeded =
-    !identityQuery && !unlockedByNix && shouldTriggerWebSearch(lastUserRawText);
+    !hasUploadedImages &&
+    !identityQuery &&
+    !unlockedByNix &&
+    shouldTriggerWebSearch(lastUserRawText);
   const searchQuery = buildSearchQuery(lastUserRawText, rawMessages);
 
   let liveSearchContext = '';
@@ -812,6 +920,7 @@ export async function executeOmniRouteAgent(options: {
       liveSearchContext,
       identityQuery,
       unlockedByNix,
+      latestImageUrls: imageUrls,
     });
 
     let emittedToClientLength = 0;
@@ -974,12 +1083,13 @@ export async function executeOmniRouteAgent(options: {
 }
 
 export async function runOmniRouteAgentStream(options: {
-  rawMessages: Array<{ role?: string; content?: string }>;
+  rawMessages: Array<{ role?: string; content?: string; imageUrls?: string[] }>;
   requestedModel?: string;
   baseUrl?: string;
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  imageUrls?: string[];
   signal?: AbortSignal;
 }): Promise<{
   status: number;
@@ -993,6 +1103,7 @@ export async function runOmniRouteAgentStream(options: {
     apiKeys,
     openRouterApiKey,
     effort,
+    imageUrls,
     signal,
   } = options;
 
@@ -1022,6 +1133,7 @@ export async function runOmniRouteAgentStream(options: {
           apiKeys,
           openRouterApiKey,
           effort,
+          imageUrls,
           signal: streamAbortController.signal,
           onSseFrame: (frame) => {
             if (!streamAbortController.signal.aborted) {
@@ -1055,7 +1167,6 @@ export async function runOmniRouteAgentStream(options: {
       }
     },
     cancel() {
-      // Triggered immediately when the client disconnects or cancels the stream
       if (!streamAbortController.signal.aborted) {
         streamAbortController.abort();
       }

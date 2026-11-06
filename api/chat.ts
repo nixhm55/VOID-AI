@@ -20,7 +20,7 @@ import { createVercelHandler } from '../src/lib/server/vercel.js';
 export const config = { supportsResponseStreaming: true };
 
 interface ChatRequestBody {
-  messages?: Array<{ role?: string; content?: string }>;
+  messages?: Array<{ role?: string; content?: string; imageUrls?: string[] }>;
   model?: string;
   effort?: string;
   embeddingModel?: VoidAiEmbeddingModel;
@@ -42,20 +42,24 @@ async function post(req: Request): Promise<Response> {
 
     const lastUserMessage = [...rawMessages]
       .reverse()
-      .find((m) => m && m.role === 'user' && m.content);
+      .find((m) => m && m.role === 'user');
     const userText = String(lastUserMessage?.content ?? '').trim();
+    const attachedImages =
+      Array.isArray(body.imageUrls) && body.imageUrls.length > 0
+        ? body.imageUrls
+        : Array.isArray(lastUserMessage?.imageUrls)
+          ? lastUserMessage.imageUrls
+          : [];
 
     // Run VoidAI Moderation (`omni-moderation-latest`) and VoidAI Memory Embeddings
-    // (`text-embedding-3-large` -> `text-embedding-3-small`) in parallel so every
-    // conversation turn utilizes the configured VoidAI specialized pipeline without
-    // blocking or failing chat if an upstream route is unavailable.
+    // (`text-embedding-3-large` -> `text-embedding-3-small`) in parallel
     const moderationPromise =
       body.moderationEnabled !== false &&
-      (userText || (body.imageUrls && body.imageUrls.length > 0))
+      (userText || attachedImages.length > 0)
         ? moderateContentViaVoidAi({
             input: buildModerationPayloadInput({
               text: userText,
-              imageUrls: body.imageUrls,
+              imageUrls: attachedImages,
             }),
           }).catch(() => null)
         : Promise.resolve(null);
@@ -100,6 +104,7 @@ async function post(req: Request): Promise<Response> {
       rawMessages,
       requestedModel: body.model,
       effort: body.effort,
+      imageUrls: attachedImages,
       signal: req.signal,
       baseUrl: resolveOmniBaseUrl(),
       apiKeys: resolveOmniApiKeys(),

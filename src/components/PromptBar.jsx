@@ -61,9 +61,9 @@ const collapseRepeatedSpeech = raw => {
 
 const cleanSpeechTranscript = text => collapseRepeatedSpeech(text);
 
-// Trilingual voice configuration — English is PRIMARY default, plus direct Native Malayalam & Hindi
+// Trilingual voice configuration for Default (Coding Engine) mode
 const SPEECH_LANGS = [
-  { code: 'en-IN', short: 'EN', apiLang: 'en', label: 'English (Primary)' },
+  { code: 'en-US', short: 'EN', apiLang: 'en', label: 'English (Default)' },
   { code: 'ml-IN', short: 'ML', apiLang: 'ml', label: 'മലയാളം (Direct)' },
   { code: 'hi-IN', short: 'HI', apiLang: 'hi', label: 'हिन्दी (Direct)' }
 ];
@@ -78,9 +78,16 @@ const DEFAULT_SOURCES = [
   {
     key: 'files',
     name: 'Photos & files',
-    description: 'Upload from this device',
+    description: 'Upload images or files from this device',
     icon: Attachment01Icon,
     attach: true
+  },
+  {
+    key: 'image',
+    name: 'Create image',
+    description: 'Generate image via OmniRoute AI',
+    icon: SparklesIcon,
+    commandPrefix: 'Create an image of '
   },
   { key: 'web', name: 'Web search', description: 'Live results', icon: Globe02Icon },
   { key: 'sales', name: 'Sales data', description: 'Revenue and churn', icon: ChartLineData01Icon },
@@ -89,6 +96,7 @@ const DEFAULT_SOURCES = [
   { key: 'calendar', name: 'Calendar', description: 'Events and availability', icon: Calendar03Icon }
 ];
 const DEFAULT_COMMANDS = [
+  { key: 'image', name: '/image', description: 'Create an image with OmniRoute AI' },
   { key: 'summarize', name: '/summarize', description: 'Digest the thread so far' },
   { key: 'compare', name: '/compare', description: 'Two options side by side' },
   { key: 'draft', name: '/draft', description: 'Write a first version' },
@@ -112,6 +120,73 @@ const blobToBase64 = blob =>
     };
     reader.onerror = reject;
     reader.readAsDataURL(blob);
+  });
+
+const readFileAsAttachment = file =>
+  new Promise(resolve => {
+    if (!file) {
+      resolve(null);
+      return;
+    }
+    if (file.type && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const rawDataUrl = String(reader.result ?? '');
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const maxDim = 1280;
+            let { width: w, height: h } = img;
+            if (w > maxDim || h > maxDim) {
+              if (w >= h) {
+                h = Math.round((h * maxDim) / w);
+                w = maxDim;
+              } else {
+                w = Math.round((w * maxDim) / h);
+                h = maxDim;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, w, h);
+              const compressed = canvas.toDataURL('image/jpeg', 0.86);
+              resolve({
+                name: file.name || 'image.jpg',
+                type: 'image/jpeg',
+                dataUrl: compressed
+              });
+              return;
+            }
+          } catch {}
+          resolve({
+            name: file.name || 'image.png',
+            type: file.type || 'image/png',
+            dataUrl: rawDataUrl
+          });
+        };
+        img.onerror = () =>
+          resolve({
+            name: file.name || 'image.png',
+            type: file.type || 'image/png',
+            dataUrl: rawDataUrl
+          });
+        img.src = rawDataUrl;
+      };
+      reader.onerror = () =>
+        resolve({
+          name: file.name || 'image.png',
+          type: file.type || 'image/png'
+        });
+      reader.readAsDataURL(file);
+      return;
+    }
+    resolve({
+      name: file.name || 'file',
+      type: file.type || 'application/octet-stream'
+    });
   });
 
 const mix = (a, b, t) => a + (b - a) * t;
@@ -202,7 +277,7 @@ export default function PromptBar({
   squash = 0.12,
   tilt = 8,
   pressScale = 0.96,
-  sttModel = 'gemini',
+  sttModel = 'default',
   className = ''
 }) {
   const reduce = useReducedMotion();
@@ -246,9 +321,16 @@ export default function PromptBar({
   const [dismissed, setDismissed] = useState(false);
   const [active, setActive] = useState(0);
   const [listening, setListening] = useState(false);
-  // English ('en-IN') is strictly the Primary language!
-  const [speechLang, setSpeechLang] = useState('en-IN');
+  const [speechLang, setSpeechLang] = useState('en-US');
   const [pressed, setPressed] = useState(false);
+
+  // Show EN / ML / HI button ONLY when the Default (Built-in Coding Engine) is selected!
+  // When Gemini Auto-Detect or an imported GPT transcription model is selected, hide the button and use auto-detection.
+  const isDefaultCodingStt = !sttModel || sttModel === 'default';
+  const isOpenAiAudioStt =
+    sttModel === 'gpt-4o-transcribe' ||
+    sttModel === 'gpt-4o-mini-transcribe' ||
+    sttModel === 'whisper-1';
 
   const model = models.find(m => m.key === modelKey) ?? models[0];
   const token = dismissed ? null : parseToken(draft);
@@ -291,49 +373,50 @@ export default function PromptBar({
       const phrase = cleanSpeechTranscript(rawPhrase);
       if (!phrase) return Promise.resolve();
 
-      // Echo / duplicate guard: never commit the exact same phrase twice in a row
       const normalizedKey = phrase.toLowerCase();
       const now = Date.now();
       if (
         normalizedKey === lastCommittedRawRef.current &&
-        now - lastCommittedTimeRef.current < 4500
+        now - lastCommittedTimeRef.current < 3200
       ) {
         return Promise.resolve();
       }
       lastCommittedRawRef.current = normalizedKey;
       lastCommittedTimeRef.current = now;
 
-      // If already in native Malayalam or Hindi Unicode script (e.g. from ml-IN / hi-IN),
-      // commit directly in 0ms without any network round-trip!
+      // Immediately commit the raw/clean phrase at a known segment index so draft NEVER drops to empty
+      const segIndex = committedSegmentsRef.current.length;
+      committedSegmentsRef.current.push(phrase);
+      currentInterimDisplayRef.current = '';
+      syncDraftFromSpeechState();
+
+      // If already in native Malayalam or Hindi Unicode script, we're done!
       if (/[\u0D00-\u0D7F\u0900-\u097F]/.test(phrase)) {
-        const lastSeg = committedSegmentsRef.current[committedSegmentsRef.current.length - 1];
-        if (lastSeg !== phrase) {
-          committedSegmentsRef.current.push(phrase);
-        }
-        currentInterimDisplayRef.current = '';
-        syncDraftFromSpeechState();
+        return Promise.resolve();
+      }
+
+      // In Default Coding mode with EN selected, keep pure English directly in 0ms
+      if (isDefaultCodingStt && langCode === 'en-US') {
         return Promise.resolve();
       }
 
       const needsIndicScript =
-        langCode === 'ml-IN' ||
-        langCode === 'hi-IN' ||
-        MALAYALAM_ROMAN_CUE_REGEX.test(phrase) ||
-        HINDI_ROMAN_CUE_REGEX.test(phrase);
+        (!isDefaultCodingStt &&
+          (MALAYALAM_ROMAN_CUE_REGEX.test(phrase) || HINDI_ROMAN_CUE_REGEX.test(phrase))) ||
+        (isDefaultCodingStt && (langCode === 'ml-IN' || langCode === 'hi-IN'));
 
-      // If standard English in primary EN mode, commit directly in 0ms for instant auto-dictation!
       if (!needsIndicScript) {
-        const lastSeg = committedSegmentsRef.current[committedSegmentsRef.current.length - 1];
-        if (!lastSeg || lastSeg.toLowerCase() !== phrase.toLowerCase()) {
-          committedSegmentsRef.current.push(phrase);
-        }
-        currentInterimDisplayRef.current = '';
-        syncDraftFromSpeechState();
         return Promise.resolve();
       }
 
-      // Convert Manglish/Hinglish via /api/transcribe and push the native script
-      const apiLang = langCode === 'ml-IN' ? 'ml' : langCode === 'hi-IN' ? 'hi' : 'en';
+      const apiLang = !isDefaultCodingStt
+        ? 'auto'
+        : langCode === 'ml-IN'
+          ? 'ml'
+          : langCode === 'hi-IN'
+            ? 'hi'
+            : 'en';
+
       const promise = authenticatedFetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -341,24 +424,18 @@ export default function PromptBar({
       })
         .then(res => (res.ok ? res.json() : null))
         .then(data => {
-          const converted = cleanSpeechTranscript(data?.text) || phrase;
-          const lastSeg = committedSegmentsRef.current[committedSegmentsRef.current.length - 1];
-          if (lastSeg !== converted) {
-            committedSegmentsRef.current.push(converted);
+          const converted = cleanSpeechTranscript(data?.text);
+          if (converted && committedSegmentsRef.current[segIndex] !== undefined) {
+            committedSegmentsRef.current[segIndex] = converted;
+            syncDraftFromSpeechState();
           }
-          currentInterimDisplayRef.current = '';
-          syncDraftFromSpeechState();
         })
-        .catch(() => {
-          committedSegmentsRef.current.push(phrase);
-          currentInterimDisplayRef.current = '';
-          syncDraftFromSpeechState();
-        });
+        .catch(() => {});
 
       pendingConversionsRef.current.push(promise);
       return promise;
     },
-    [sttModel, syncDraftFromSpeechState]
+    [isDefaultCodingStt, sttModel, syncDraftFromSpeechState]
   );
 
   const stopMediaRecorder = useCallback(
@@ -398,7 +475,14 @@ export default function PromptBar({
           const fallbackHint = collapseRepeatedSpeech(
             committedSegmentsRef.current.filter(Boolean).join(' ')
           );
-          const apiLang = speechLang === 'ml-IN' ? 'ml' : speechLang === 'hi-IN' ? 'hi' : 'auto';
+          const apiLang = isDefaultCodingStt
+            ? speechLang === 'ml-IN'
+              ? 'ml'
+              : speechLang === 'hi-IN'
+                ? 'hi'
+                : 'en'
+            : 'auto';
+
           blobToBase64(blob)
             .then(audioBase64 =>
               authenticatedFetch('/api/transcribe', {
@@ -407,7 +491,7 @@ export default function PromptBar({
                 body: JSON.stringify({
                   audioBase64,
                   mimeType: cleanMime,
-                  model: sttModel === 'gemini' ? 'gpt-4o-transcribe' : sttModel,
+                  model: isOpenAiAudioStt ? sttModel : 'gpt-4o-transcribe',
                   lang: apiLang,
                   hint: fallbackHint
                 })
@@ -416,7 +500,7 @@ export default function PromptBar({
             .then(res => (res.ok ? res.json() : null))
             .then(data => {
               const transcribed = cleanSpeechTranscript(data?.text);
-              if (transcribed && committedSegmentsRef.current.length === 0) {
+              if (transcribed && (isOpenAiAudioStt || committedSegmentsRef.current.length === 0)) {
                 committedSegmentsRef.current = [transcribed];
                 currentInterimDisplayRef.current = '';
                 syncDraftFromSpeechState();
@@ -441,10 +525,10 @@ export default function PromptBar({
       pendingConversionsRef.current.push(stopPromise);
       return stopPromise;
     },
-    [speechLang, sttModel, syncDraftFromSpeechState]
+    [isDefaultCodingStt, isOpenAiAudioStt, speechLang, sttModel, syncDraftFromSpeechState]
   );
 
-  const startMediaRecorderFallback = useCallback(async () => {
+  const startMediaRecorder = useCallback(async () => {
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices?.getUserMedia ||
@@ -481,19 +565,20 @@ export default function PromptBar({
         } catch {}
         recognitionRef.current = null;
       }
-      void stopMediaRecorder(flushInterim);
-      setListening(false);
       if (flushInterim && latestRawInterimRef.current.trim()) {
         const leftover = latestRawInterimRef.current;
         latestRawInterimRef.current = '';
         currentInterimDisplayRef.current = '';
-        void convertAndCommitPhrase(leftover, speechLang);
+        const effectiveLang = isDefaultCodingStt ? speechLang : 'en-IN';
+        void convertAndCommitPhrase(leftover, effectiveLang);
       } else {
         latestRawInterimRef.current = '';
         currentInterimDisplayRef.current = '';
       }
+      void stopMediaRecorder(flushInterim);
+      setListening(false);
     },
-    [convertAndCommitPhrase, speechLang, stopMediaRecorder]
+    [convertAndCommitPhrase, isDefaultCodingStt, speechLang, stopMediaRecorder]
   );
 
   useLayoutEffect(() => {
@@ -684,8 +769,11 @@ export default function PromptBar({
       setDraft(head);
       Promise.resolve(latest.current.onAttach?.()).then(files => {
         if (!files) return;
-        setAttachments(a => [...a, ...(Array.isArray(files) ? files : [files])]);
+        const nextList = Array.isArray(files) ? files : [files];
+        setAttachments(a => [...a, ...nextList.filter(Boolean)]);
       });
+    } else if (row.commandPrefix) {
+      setDraft(`${head}${row.commandPrefix}`);
     } else if (open === 'at') {
       setDraft(`${head}@${row.name} `);
     } else {
@@ -709,8 +797,9 @@ export default function PromptBar({
         new Promise(r => setTimeout(r, 1500))
       ]);
     }
+    const combinedFromSpeech = computeCombinedDraft();
     const finalToSend = collapseRepeatedSpeech(
-      committedSegmentsRef.current.length > 0 ? computeCombinedDraft() : draft
+      combinedFromSpeech.length >= draft.trim().length ? combinedFromSpeech : draft
     );
     baseDraftRef.current = '';
     committedSegmentsRef.current = [];
@@ -743,8 +832,8 @@ export default function PromptBar({
       processedResultIndicesRef.current = new Set();
 
       const recognition = new SpeechRecognition();
-      // Supports English (Primary 'en-IN'), Direct Malayalam ('ml-IN'), and Direct Hindi ('hi-IN')
-      recognition.lang = langCode;
+      const effectiveBcp47 = isDefaultCodingStt ? langCode : 'en-IN';
+      recognition.lang = effectiveBcp47;
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
@@ -776,23 +865,27 @@ export default function PromptBar({
           currentInterimDisplayRef.current = '';
           const combinedFinal = cleanSpeechTranscript(newlyFinalSegments.join(' '));
           if (combinedFinal) {
-            void convertAndCommitPhrase(combinedFinal, langCode);
+            void convertAndCommitPhrase(combinedFinal, effectiveBcp47);
           }
         } else if (cleanedInterim) {
-          // If already native Malayalam/Hindi Unicode or plain English without Indic cues, show immediately
-          const hasIndicCue =
-            MALAYALAM_ROMAN_CUE_REGEX.test(cleanedInterim) ||
-            HINDI_ROMAN_CUE_REGEX.test(cleanedInterim);
+          currentInterimDisplayRef.current = cleanedInterim;
+          syncDraftFromSpeechState();
 
-          if (/[\u0D00-\u0D7F\u0900-\u097F]/.test(cleanedInterim) || !hasIndicCue) {
-            currentInterimDisplayRef.current = cleanedInterim;
-            syncDraftFromSpeechState();
-          } else {
-            // Show interim immediately AND convert Manglish/Hinglish live in ~40ms!
-            currentInterimDisplayRef.current = cleanedInterim;
-            syncDraftFromSpeechState();
+          const shouldTransliterateInterim =
+            (isDefaultCodingStt && (effectiveBcp47 === 'ml-IN' || effectiveBcp47 === 'hi-IN')) ||
+            (!isDefaultCodingStt &&
+              (MALAYALAM_ROMAN_CUE_REGEX.test(cleanedInterim) ||
+                HINDI_ROMAN_CUE_REGEX.test(cleanedInterim)));
+
+          if (shouldTransliterateInterim && !/[\u0D00-\u0D7F\u0900-\u097F]/.test(cleanedInterim)) {
             const seq = ++interimConvertSeqRef.current;
-            const apiLang = langCode === 'ml-IN' ? 'ml' : langCode === 'hi-IN' ? 'hi' : 'en';
+            const apiLang = !isDefaultCodingStt
+              ? 'auto'
+              : effectiveBcp47 === 'ml-IN'
+                ? 'ml'
+                : effectiveBcp47 === 'hi-IN'
+                  ? 'hi'
+                  : 'en';
             void authenticatedFetch('/api/transcribe', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -826,6 +919,13 @@ export default function PromptBar({
       };
 
       recognition.onend = () => {
+        // Flush any uncommitted interim speech before restarting so words never vanish
+        if (latestRawInterimRef.current.trim()) {
+          const pendingText = latestRawInterimRef.current;
+          latestRawInterimRef.current = '';
+          currentInterimDisplayRef.current = '';
+          void convertAndCommitPhrase(pendingText, effectiveBcp47);
+        }
         if (shouldKeepListeningRef.current) {
           processedResultIndicesRef.current = new Set();
           try {
@@ -848,7 +948,7 @@ export default function PromptBar({
         return false;
       }
     },
-    [convertAndCommitPhrase, sttModel, syncDraftFromSpeechState]
+    [convertAndCommitPhrase, isDefaultCodingStt, sttModel, syncDraftFromSpeechState]
   );
 
   const toggleListen = () => {
@@ -869,8 +969,12 @@ export default function PromptBar({
     const SpeechRecognition =
       typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
 
-    // Do NOT call getUserMedia (MediaRecorder) simultaneously with webkitSpeechRecognition
-    // so live browser auto-dictation never loses the microphone stream!
+    // If an OpenAI audio transcription model is explicitly selected, start MediaRecorder alongside
+    // browser recognition so audio is captured and sent to /api/transcribe when finished.
+    if (isOpenAiAudioStt) {
+      void startMediaRecorder();
+    }
+
     if (SpeechRecognition) {
       shouldKeepListeningRef.current = true;
       setListening(true);
@@ -882,9 +986,9 @@ export default function PromptBar({
       shouldKeepListeningRef.current = false;
     }
 
-    // Fallback when SpeechRecognition is unavailable: record audio and transcribe via VoidAI STT
+    // Fallback when SpeechRecognition is unavailable: record audio and transcribe via VoidAI/OmniRoute STT
     setListening(true);
-    void startMediaRecorderFallback().then(started => {
+    void startMediaRecorder().then(started => {
       if (!started) {
         const seq = ++dictation.current;
         Promise.resolve(latest.current.onDictate?.()).then(
@@ -916,6 +1020,24 @@ export default function PromptBar({
       startBrowserRecognition(nextObj.code);
     }
     focusInput();
+  };
+
+  const handlePaste = e => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imageFiles = items
+      .filter(item => item.type && item.type.startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter(Boolean);
+
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      Promise.all(imageFiles.map(readFileAsAttachment)).then(resolved => {
+        const valid = resolved.filter(Boolean);
+        if (valid.length > 0) {
+          setAttachments(prev => [...prev, ...valid]);
+        }
+      });
+    }
   };
 
   const onKeyDown = e => {
@@ -1067,20 +1189,50 @@ export default function PromptBar({
         <canvas ref={sparkRef} className="prompt-bar__sparks" aria-hidden="true" />
         {attachments.length > 0 ? (
           <div className="prompt-bar__chips">
-            {attachments.map((file, i) => (
-              <span key={`${file}-${i}`} className="prompt-bar__chip">
-                <HugeiconsIcon icon={File02Icon} size={12} strokeWidth={2} />
-                <span className="prompt-bar__chip-name">{file}</span>
-                <button
-                  type="button"
-                  className="prompt-bar__chip-x"
-                  aria-label={`Remove ${file}`}
-                  onClick={() => setAttachments(a => a.filter((_, j) => j !== i))}
-                >
-                  <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2.5} />
-                </button>
-              </span>
-            ))}
+            {attachments.map((item, i) => {
+              const isObj = item && typeof item === 'object';
+              const fileName = isObj ? item.name : String(item);
+              const dataUrl = isObj ? item.dataUrl : undefined;
+              const isImage = Boolean(dataUrl && String(dataUrl).startsWith('data:image/'));
+
+              if (isImage) {
+                return (
+                  <div key={`${fileName}-${i}`} className="prompt-bar__chip-img-wrap">
+                    <img
+                      src={dataUrl}
+                      alt={fileName}
+                      className="prompt-bar__chip-img"
+                    />
+                    <button
+                      type="button"
+                      className="prompt-bar__chip-img-x"
+                      aria-label={`Remove ${fileName}`}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setAttachments(a => a.filter((_, j) => j !== i));
+                      }}
+                    >
+                      <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2.5} />
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <span key={`${fileName}-${i}`} className="prompt-bar__chip">
+                  <HugeiconsIcon icon={File02Icon} size={12} strokeWidth={2} />
+                  <span className="prompt-bar__chip-name">{fileName}</span>
+                  <button
+                    type="button"
+                    className="prompt-bar__chip-x"
+                    aria-label={`Remove ${fileName}`}
+                    onClick={() => setAttachments(a => a.filter((_, j) => j !== i))}
+                  >
+                    <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2.5} />
+                  </button>
+                </span>
+              );
+            })}
           </div>
         ) : null}
 
@@ -1089,16 +1241,9 @@ export default function PromptBar({
           className="prompt-bar__input"
           rows={1}
           value={draft}
-          placeholder={
-            listening
-              ? speechLang === 'ml-IN'
-                ? 'സംസാരിക്കൂ (മലയാളം)…'
-                : speechLang === 'hi-IN'
-                  ? 'बोलिए (हिन्दी)…'
-                  : 'Speak in English, മലയാളം, or हिन्दी…'
-              : placeholder
-          }
+          placeholder={listening ? 'Speak in your language' : placeholder}
           aria-label="Prompt"
+          onPaste={handlePaste}
           onChange={e => {
             setDraft(e.target.value);
             if (listening) {
@@ -1178,17 +1323,19 @@ export default function PromptBar({
           <span className="prompt-bar__spacer" />
           {onDictate ? (
             <>
-              <button
-                type="button"
-                className="prompt-bar__lang"
-                title={`Voice language: ${currentLangObj.label} (Click to switch EN / ML / HI)`}
-                aria-label={`Voice language: ${currentLangObj.label}`}
-                data-on={listening ? '' : undefined}
-                onMouseDown={e => e.preventDefault()}
-                onClick={cycleSpeechLang}
-              >
-                {currentLangObj.short}
-              </button>
+              {isDefaultCodingStt ? (
+                <button
+                  type="button"
+                  className="prompt-bar__lang"
+                  title={`Voice language: ${currentLangObj.label} (Click to switch EN / ML / HI)`}
+                  aria-label={`Voice language: ${currentLangObj.label}`}
+                  data-on={listening ? '' : undefined}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={cycleSpeechLang}
+                >
+                  {currentLangObj.short}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="prompt-bar__tool"

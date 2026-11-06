@@ -13,6 +13,8 @@ import {
   type StreamChatMessage,
 } from './lib/chat-stream';
 import {
+  type ChatAttachment,
+  type ChatAttachmentItem,
   type ChatMessage,
   type ChatSession,
   type UserSettings,
@@ -37,22 +39,114 @@ import {
 const sessionFingerprint = (session: ChatSession) => JSON.stringify(session);
 
 function createClientId(): string {
-  return globalThis.crypto?.randomUUID?.() ??
-    `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+}
+
+function readSingleFileAsAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve) => {
+    if (file.type && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const rawDataUrl = String(reader.result ?? '');
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const maxDim = 1280;
+            let { width: w, height: h } = img;
+            if (w > maxDim || h > maxDim) {
+              if (w >= h) {
+                h = Math.round((h * maxDim) / w);
+                w = maxDim;
+              } else {
+                w = Math.round((w * maxDim) / h);
+                h = maxDim;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, w, h);
+              const compressed = canvas.toDataURL('image/jpeg', 0.86);
+              resolve({
+                name: file.name || 'image.jpg',
+                type: 'image/jpeg',
+                dataUrl: compressed,
+              });
+              return;
+            }
+          } catch {
+            // Fall back to raw dataUrl
+          }
+          resolve({
+            name: file.name || 'image.png',
+            type: file.type || 'image/png',
+            dataUrl: rawDataUrl,
+          });
+        };
+        img.onerror = () =>
+          resolve({
+            name: file.name || 'image.png',
+            type: file.type || 'image/png',
+            dataUrl: rawDataUrl,
+          });
+        img.src = rawDataUrl;
+      };
+      reader.onerror = () =>
+        resolve({
+          name: file.name || 'image.png',
+          type: file.type || 'image/png',
+        });
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    resolve({
+      name: file.name || 'file',
+      type: file.type || 'application/octet-stream',
+    });
+  });
 }
 
 const pickFiles = () =>
-  new Promise<string[]>((resolve) => {
+  new Promise<ChatAttachment[]>((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
+    input.accept = 'image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py';
     input.multiple = true;
     input.onchange = () => {
-      const files = Array.from(input.files ?? []).map((file) => file.name);
-      resolve(files);
+      const rawFiles = Array.from(input.files ?? []);
+      if (rawFiles.length === 0) {
+        resolve([]);
+        return;
+      }
+      void Promise.all(rawFiles.map(readSingleFileAsAttachment)).then(resolve);
     };
     input.oncancel = () => resolve([]);
     input.click();
   });
+
+function extractAttachmentImageUrls(
+  attachments?: ChatAttachmentItem[],
+): string[] {
+  if (!attachments || attachments.length === 0) return [];
+  const urls: string[] = [];
+  for (const item of attachments) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      typeof item.dataUrl === 'string' &&
+      item.dataUrl.startsWith('data:image/')
+    ) {
+      urls.push(item.dataUrl);
+    }
+  }
+  return urls;
+}
 
 export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>(() =>
@@ -75,6 +169,9 @@ export default function App() {
   const [selectedEffort, setSelectedEffort] = useState<string>('High');
   const [busy, setBusy] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [lastCompletedAiId, setLastCompletedAiId] = useState<string | null>(
+    null,
+  );
   const controller = useRef<AbortController | null>(null);
 
   const handleStopGeneration = () => {
@@ -119,7 +216,10 @@ export default function App() {
             const current = latestSessions.current.find(
               (item) => item.id === session.id,
             );
-            if (current && sessionFingerprint(current) === sessionFingerprint(session)) {
+            if (
+              current &&
+              sessionFingerprint(current) === sessionFingerprint(session)
+            ) {
               persistedHashes.current[session.id] = sessionFingerprint(session);
             }
           }
@@ -165,7 +265,10 @@ export default function App() {
           setHistoryWarning(result.warning);
           if (!result.warning) {
             persistedHashes.current = Object.fromEntries(
-              result.sessions.map((item) => [item.id, sessionFingerprint(item)]),
+              result.sessions.map((item) => [
+                item.id,
+                sessionFingerprint(item),
+              ]),
             );
           }
           setHistoryReady(true);
@@ -198,9 +301,11 @@ export default function App() {
           if (!active || historyUserId.current !== authUser.id) return;
           setSessions((current) => {
             const merged = mergeChatHistory(remoteSessions, current);
-            return merged.filter((session) =>
-              remoteSessions.some((remote) => remote.id === session.id) ||
-              persistedHashes.current[session.id] !== sessionFingerprint(session),
+            return merged.filter(
+              (session) =>
+                remoteSessions.some((remote) => remote.id === session.id) ||
+                persistedHashes.current[session.id] !==
+                  sessionFingerprint(session),
             );
           });
         })
@@ -262,7 +367,9 @@ export default function App() {
     if (authUser && historyReady) {
       void deleteChatHistoryItem(authUser.id, id).catch((error: unknown) => {
         const details = error instanceof Error ? ` ${error.message}` : '';
-        setHistoryWarning(`Could not delete this conversation from Supabase.${details}`);
+        setHistoryWarning(
+          `Could not delete this conversation from Supabase.${details}`,
+        );
       });
     }
   };
@@ -279,7 +386,9 @@ export default function App() {
     if (authUser && historyReady) {
       void deleteAllChatHistory(authUser.id).catch((error: unknown) => {
         const details = error instanceof Error ? ` ${error.message}` : '';
-        setHistoryWarning(`Could not clear chat history from Supabase.${details}`);
+        setHistoryWarning(
+          `Could not clear chat history from Supabase.${details}`,
+        );
       });
     }
   };
@@ -295,7 +404,7 @@ export default function App() {
         const initialMessages = updater([]);
         const newSession: ChatSession = {
           id: sessionId,
-          title: deriveChatTitle(fallbackFirstText),
+          title: deriveChatTitle(fallbackFirstText || 'Image analysis'),
           messages: initialMessages,
           pinned: false,
           createdAt: Date.now(),
@@ -328,12 +437,12 @@ export default function App() {
       model,
       effort,
     }: {
-      attachments: string[];
+      attachments: ChatAttachmentItem[];
       model: { key: string; name?: string; shortName?: string };
       effort: string;
     },
   ) => {
-    if (!authUser || !historyReady) {
+    if (isSupabaseConfigured() && (!authUser || !historyReady)) {
       setAuthOpen(true);
       return;
     }
@@ -343,10 +452,15 @@ export default function App() {
       setActiveChatId(targetChatId);
     }
 
+    const uploadedImageUrls = extractAttachmentImageUrls(attachments);
+    const effectiveText =
+      text.trim() ||
+      (uploadedImageUrls.length > 0 ? 'Analyze this image' : '');
+
     const userMsg: ChatMessage = {
       id: createClientId(),
       role: 'user',
-      text,
+      text: text.trim(),
       attachments: attachments.length > 0 ? [...attachments] : undefined,
       createdAt: Date.now(),
     };
@@ -358,34 +472,45 @@ export default function App() {
       appendOrUpdateSessionMessages(
         targetChatId,
         (prev) => [...prev, userMsg],
-        text,
+        effectiveText,
       );
       return;
     }
 
     // Store semantic memory vector in the dimension-partitioned store (`3072d` or `1536d`)
-    if (text.trim().length > 0) {
+    if (effectiveText.length > 0) {
       void addSemanticMemory({
-        text,
+        text: effectiveText,
         preferredModel: settings.embeddingModel,
       }).catch(() => {});
     }
 
     const aiMsgId = createClientId();
     const historyPayload: StreamChatMessage[] = [...existingMessages, userMsg]
-      .filter((m) => m.text.trim().length > 0)
-      .map((m) => ({
-        role: m.role,
-        content: m.text,
-      }));
+      .filter(
+        (m) =>
+          m.text.trim().length > 0 ||
+          extractAttachmentImageUrls(m.attachments).length > 0,
+      )
+      .map((m) => {
+        const msgImages = extractAttachmentImageUrls(m.attachments);
+        return {
+          role: m.role,
+          content:
+            m.text.trim() ||
+            (msgImages.length > 0 ? 'Please analyze this image.' : ''),
+          ...(msgImages.length > 0 ? { imageUrls: msgImages } : {}),
+        };
+      });
 
     appendOrUpdateSessionMessages(
       targetChatId,
       (prev) => [...prev, userMsg],
-      text,
+      effectiveText,
     );
     setBusy(true);
     setStreamingId(null);
+    setLastCompletedAiId(null);
     controller.current = new AbortController();
 
     let createdAiBubble = false;
@@ -398,6 +523,7 @@ export default function App() {
         effort: effectiveEffort,
         embeddingModel: settings.embeddingModel,
         moderationEnabled: settings.moderationEnabled,
+        imageUrls: uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined,
         signal: controller.current.signal,
         onChunk: (_delta, fullText) => {
           if (!createdAiBubble) {
@@ -421,6 +547,9 @@ export default function App() {
           }
         },
       });
+      if (createdAiBubble) {
+        setLastCompletedAiId(aiMsgId);
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
@@ -556,17 +685,36 @@ export default function App() {
           >
             {messages.map((msg) =>
               msg.role === 'user' ? (
-                <div key={msg.id} className="flex flex-col items-end gap-1.5">
+                <div key={msg.id} className="flex flex-col items-end gap-2">
                   {msg.attachments && msg.attachments.length > 0 ? (
-                    <div className="flex flex-wrap justify-end gap-1.5">
-                      {msg.attachments.map((file, i) => (
-                        <span
-                          key={`${file}-${i}`}
-                          className="rounded-lg bg-[#27272a] px-2.5 py-1 text-xs text-[#a1a1aa]"
-                        >
-                          {file}
-                        </span>
-                      ))}
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {msg.attachments.map((item, i) => {
+                        const isObj = item && typeof item === 'object';
+                        const name = isObj ? item.name : String(item);
+                        const dataUrl = isObj ? item.dataUrl : undefined;
+                        if (dataUrl && dataUrl.startsWith('data:image/')) {
+                          return (
+                            <div
+                              key={`${name}-${i}`}
+                              className="overflow-hidden rounded-2xl border border-white/[0.12] bg-[#18181b] shadow-md"
+                            >
+                              <img
+                                src={dataUrl}
+                                alt={name}
+                                className="max-h-56 max-w-[260px] object-cover"
+                              />
+                            </div>
+                          );
+                        }
+                        return (
+                          <span
+                            key={`${name}-${i}`}
+                            className="rounded-lg bg-[#27272a] px-2.5 py-1 text-xs text-[#a1a1aa]"
+                          >
+                            {name}
+                          </span>
+                        );
+                      })}
                     </div>
                   ) : null}
                   {msg.text ? (
@@ -584,6 +732,9 @@ export default function App() {
                   ttsModel={settings.ttsModel}
                   ttsSpeed={settings.ttsSpeed}
                   autoRead={settings.autoReadResponses}
+                  shouldAutoRead={
+                    settings.autoReadResponses && lastCompletedAiId === msg.id
+                  }
                 />
               ),
             )}
@@ -626,7 +777,9 @@ export default function App() {
               defaultModel="void-combo"
               efforts={['Low', 'Medium', 'High', 'Extra', 'Max']}
               defaultEffort={selectedEffort}
-              onEffortChange={(nextEffort: string) => setSelectedEffort(nextEffort)}
+              onEffortChange={(nextEffort: string) =>
+                setSelectedEffort(nextEffort)
+              }
               busy={busy}
               onSend={send}
               onStop={handleStopGeneration}
@@ -650,7 +803,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Settings Modal (Voice Settings & General Preferences) */}
+      {/* Settings Modal (Voice Settings, AI Models & General Preferences) */}
       <SettingsModal
         open={settingsOpen}
         settings={settings}
