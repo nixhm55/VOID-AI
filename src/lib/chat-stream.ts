@@ -23,7 +23,7 @@ export interface StreamChatOptions {
 export async function streamChatCompletion({
   messages,
   model = 'void-combo',
-  effort,
+  effort = 'High',
   signal,
   onChunk,
 }: StreamChatOptions): Promise<string> {
@@ -33,7 +33,10 @@ export async function streamChatCompletion({
   if (
     normalizedModel === '4-argon' ||
     normalizedModel === '4 argon' ||
-    normalizedModel === 'argon'
+    normalizedModel === 'argon' ||
+    normalizedModel === '4-argan' ||
+    normalizedModel === '4 argan' ||
+    normalizedModel === 'argan'
   ) {
     return '';
   }
@@ -55,7 +58,7 @@ export async function streamChatCompletion({
     body: JSON.stringify({
       messages,
       model: model || 'void-combo',
-      effort,
+      effort: effort || 'High',
     }),
     signal,
   });
@@ -86,8 +89,13 @@ export async function streamChatCompletion({
   let rawFullText = '';
   let normalizedFullText = '';
 
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+
   const emitDelta = (incomingDelta: string) => {
-    if (!incomingDelta) return;
+    if (!incomingDelta || signal?.aborted) return;
     rawFullText += incomingDelta;
     const nextNormalized = normalizeVoidIdentity(rawFullText, {
       isIdentityReply,
@@ -136,23 +144,34 @@ export async function streamChatCompletion({
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (!signal?.aborted) {
+      const { done, value } = await reader.read();
+      if (done || signal?.aborted) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
 
-    for (const line of lines) {
-      processLine(line);
+      for (const line of lines) {
+        if (signal?.aborted) break;
+        processLine(line);
+      }
     }
-  }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    for (const line of buffer.split('\n')) {
-      processLine(line);
+    if (!signal?.aborted) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        for (const line of buffer.split('\n')) {
+          processLine(line);
+        }
+      }
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    if (signal?.aborted) {
+      await reader.cancel().catch(() => {});
+      throw new DOMException('Aborted', 'AbortError');
     }
   }
 

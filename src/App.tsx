@@ -71,9 +71,17 @@ export default function App() {
     loadUserSettings(),
   );
 
+  const [selectedEffort, setSelectedEffort] = useState<string>('High');
   const [busy, setBusy] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const controller = useRef<AbortController | null>(null);
+
+  const handleStopGeneration = () => {
+    controller.current?.abort();
+    controller.current = null;
+    setBusy(false);
+    setStreamingId(null);
+  };
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const historyUserId = useRef<string | null | undefined>(undefined);
   const historyRequest = useRef(0);
@@ -376,10 +384,11 @@ export default function App() {
     let createdAiBubble = false;
 
     try {
+      const effectiveEffort = effort || selectedEffort || 'High';
       await streamChatCompletion({
         messages: historyPayload,
         model: model?.key || 'void-combo',
-        effort,
+        effort: effectiveEffort,
         signal: controller.current.signal,
         onChunk: (_delta, fullText) => {
           if (!createdAiBubble) {
@@ -605,10 +614,11 @@ export default function App() {
               placeholder="Ask anything"
               defaultModel="void-combo"
               efforts={['Low', 'Medium', 'High', 'Extra', 'Max']}
-              onEffortChange={() => {}}
+              defaultEffort={selectedEffort}
+              onEffortChange={(nextEffort: string) => setSelectedEffort(nextEffort)}
               busy={busy}
               onSend={send}
-              onStop={() => controller.current?.abort()}
+              onStop={handleStopGeneration}
               onAttach={() => pickFiles()}
               onDictate={() => ''}
               background="#27272a"

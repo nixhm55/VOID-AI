@@ -4,6 +4,8 @@ import {
   DEFAULT_OMNI_BASE_URL,
   OPENROUTER_API_KEY,
   OPENROUTER_ENDPOINT,
+  resolveOmniApiKeys,
+  resolveOmniBaseUrl,
 } from './tools/config';
 import {
   VOID_SYSTEM_PROMPT,
@@ -41,24 +43,78 @@ export {
   isModelIdentityQuery,
   isRealtimeRefusalResponse,
   normalizeVoidIdentity,
+  resolveOmniApiKeys,
+  resolveOmniBaseUrl,
   shouldTriggerWebSearch,
 };
 export type { OmniSearchResponse, OmniSearchResultItem };
 
-function normalizeReasoningEffort(effort?: string): string | undefined {
-  const value = effort?.trim().toLowerCase();
-  if (!value) return undefined;
-  const uiEffortMap: Record<string, string> = {
-    low: 'low',
-    medium: 'medium',
-    high: 'high',
-    extra: 'xhigh',
-    max: 'xhigh',
-  };
-  if (value in uiEffortMap) return uiEffortMap[value];
-  return ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)
-    ? value
-    : undefined;
+export interface EffortConfiguration {
+  level: 'low' | 'medium' | 'high' | 'extra' | 'max';
+  reasoningEffort: 'low' | 'medium' | 'high';
+  temperature: number;
+  maxTokens: number;
+  systemDirective: string;
+}
+
+/**
+ * Maps the UI Effort selector (Low, Medium, High, Extra, Max) to concrete
+ * upstream generation parameters (`reasoning_effort`, `temperature`, `max_tokens`)
+ * and system-level reasoning instructions.
+ */
+export function resolveEffortConfiguration(effort?: string): EffortConfiguration {
+  const raw = (effort ?? 'High').trim().toLowerCase();
+
+  switch (raw) {
+    case 'low':
+    case 'minimal':
+      return {
+        level: 'low',
+        reasoningEffort: 'low',
+        temperature: 0.3,
+        maxTokens: 1024,
+        systemDirective:
+          '[EFFORT LEVEL: LOW — Prioritize speed and brevity. Give a direct, concise answer without unnecessary elaboration.]',
+      };
+    case 'medium':
+      return {
+        level: 'medium',
+        reasoningEffort: 'medium',
+        temperature: 0.5,
+        maxTokens: 2048,
+        systemDirective:
+          '[EFFORT LEVEL: MEDIUM — Provide a balanced, clear, and well-structured response.]',
+      };
+    case 'extra':
+      return {
+        level: 'extra',
+        reasoningEffort: 'high',
+        temperature: 0.65,
+        maxTokens: 6144,
+        systemDirective:
+          '[EFFORT LEVEL: EXTRA — Think deeply step-by-step, verify edge cases, and provide a comprehensive, detailed response.]',
+      };
+    case 'max':
+    case 'xhigh':
+      return {
+        level: 'max',
+        reasoningEffort: 'high',
+        temperature: 0.7,
+        maxTokens: 8192,
+        systemDirective:
+          '[EFFORT LEVEL: MAX — Engage maximum reasoning depth, exhaustive architectural verification, and complete production-ready detail.]',
+      };
+    case 'high':
+    default:
+      return {
+        level: 'high',
+        reasoningEffort: 'high',
+        temperature: 0.6,
+        maxTokens: 4096,
+        systemDirective:
+          '[EFFORT LEVEL: HIGH — Think carefully and provide a thorough, accurate, and well-structured response.]',
+      };
+  }
 }
 
 export interface AgentToolCall {
@@ -70,8 +126,47 @@ export interface AgentToolCall {
   };
 }
 
+function linkAbortSignals(
+  parentSignal?: AbortSignal,
+  timeoutMs?: number,
+): { controller: AbortController; cleanup: () => void } {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const onParentAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  };
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort();
+    } else {
+      parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+  }
+
+  if (timeoutMs && timeoutMs > 0 && !controller.signal.aborted) {
+    timer = setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+    }, timeoutMs);
+  }
+
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    if (parentSignal) {
+      parentSignal.removeEventListener('abort', onParentAbort);
+    }
+  };
+
+  return { controller, cleanup };
+}
+
 /**
- * MIRASH OpenRouter Model Fallback Loop
+ * MIRASH OpenRouter Model Fallback Loop with AbortSignal & Effort support
  */
 export async function callMirashOpenRouterStep(options: {
   openRouterApiKey?: string;
@@ -79,6 +174,7 @@ export async function callMirashOpenRouterStep(options: {
   omniEndpoint: string;
   omniApiKeys: string[];
   messages: Array<{ role: string; content: string }>;
+  signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
 }): Promise<{
   ok: boolean;
@@ -94,17 +190,28 @@ export async function callMirashOpenRouterStep(options: {
     omniEndpoint,
     omniApiKeys,
     messages,
+    signal,
     onTextDelta,
   } = options;
 
+  const effortConfig = resolveEffortConfiguration(effort);
   let lastStatus = 502;
   let lastErrorText = '';
 
   const orderedCandidateModels = [...AI_MODELS, 'openrouter/free'];
 
   for (const model of orderedCandidateModels) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 9000);
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        status: 499,
+        errorText: 'Request aborted by client.',
+        contentText: '',
+        toolCalls: [],
+      };
+    }
+
+    const { controller, cleanup } = linkAbortSignals(signal, 9500);
 
     try {
       const res = await fetch(OPENROUTER_ENDPOINT, {
@@ -118,23 +225,38 @@ export async function callMirashOpenRouterStep(options: {
         body: JSON.stringify({
           model,
           messages,
-          ...(normalizeReasoningEffort(effort)
-            ? { reasoning: { effort: normalizeReasoningEffort(effort) } }
-            : {}),
+          temperature: effortConfig.temperature,
+          max_tokens: effortConfig.maxTokens,
+          reasoning: { effort: effortConfig.reasoningEffort },
           stream: true,
         }),
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!res.ok || !res.body) {
         lastStatus = res.status;
         lastErrorText = await res.text().catch(() => res.statusText);
+        cleanup();
         continue;
       }
 
-      const parsed = await consumeUpstreamStream(res.body, onTextDelta);
+      const parsed = await consumeUpstreamStream(
+        res.body,
+        onTextDelta,
+        controller.signal,
+      );
+      cleanup();
+
+      if (signal?.aborted) {
+        return {
+          ok: false,
+          status: 499,
+          errorText: 'Request aborted by client.',
+          contentText: parsed.contentText,
+          toolCalls: [],
+        };
+      }
+
       if (parsed.contentText.trim().length > 0 || parsed.toolCalls.length > 0) {
         return {
           ok: true,
@@ -148,19 +270,29 @@ export async function callMirashOpenRouterStep(options: {
 
       lastErrorText = `Model ${model} returned an empty response.`;
     } catch (err) {
-      clearTimeout(timeoutId);
+      cleanup();
+      if (signal?.aborted) {
+        return {
+          ok: false,
+          status: 499,
+          errorText: 'Request aborted by client.',
+          contentText: '',
+          toolCalls: [],
+        };
+      }
       lastErrorText =
         err instanceof Error ? err.message : `Model ${model} failed`;
     }
   }
 
-  if (omniApiKeys.length > 0) {
+  if (omniApiKeys.length > 0 && !signal?.aborted) {
     const omniFallback = await callOmniRouteChatStep({
       endpoint: omniEndpoint,
       apiKeys: omniApiKeys,
       model: DEFAULT_COMBO_MODEL,
       messages,
       effort,
+      signal,
       onTextDelta,
     });
     if (omniFallback.ok) {
@@ -187,6 +319,7 @@ async function callOmniRouteChatStep(options: {
   messages: Array<{ role: string; content: string }>;
   enableTools?: boolean;
   effort?: string;
+  signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
 }): Promise<{
   ok: boolean;
@@ -203,56 +336,121 @@ async function callOmniRouteChatStep(options: {
     messages,
     enableTools = false,
     effort,
+    signal,
     onTextDelta,
   } = options;
 
+  const effortConfig = resolveEffortConfiguration(effort);
   let lastStatus = 502;
   let lastErrorText = '';
 
   for (const apiKey of apiKeys) {
-    try {
-      const payload: Record<string, unknown> = {
-        model,
-        messages,
-        stream: true,
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        status: 499,
+        errorText: 'Request aborted by client.',
+        contentText: '',
+        toolCalls: [],
       };
-      const normalizedEffort = normalizeReasoningEffort(effort);
-      if (normalizedEffort) payload.reasoning_effort = normalizedEffort;
-      if (enableTools) {
-        payload.tools = [WEB_SEARCH_TOOL_DEFINITION];
-        payload.tool_choice = 'auto';
-      }
+    }
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(payload),
-      });
+    // Try with full effort parameters (`reasoning_effort`, `temperature`, `max_tokens`),
+    // and automatically retry without `reasoning_effort` if an upstream model rejects that key.
+    for (const includeReasoningEffort of [true, false]) {
+      if (signal?.aborted) break;
 
-      if (!res.ok || !res.body) {
-        lastStatus = res.status;
-        lastErrorText = await res.text().catch(() => res.statusText);
-        continue;
-      }
+      const { controller, cleanup } = linkAbortSignals(signal);
 
-      const parsed = await consumeUpstreamStream(res.body, onTextDelta);
-      if (parsed.contentText.trim().length > 0 || parsed.toolCalls.length > 0) {
-        return {
-          ok: true,
-          status: 200,
-          errorText: '',
-          contentText: parsed.contentText,
-          toolCalls: parsed.toolCalls,
-          usedModel: parsed.detectedModel || model,
+      try {
+        const payload: Record<string, unknown> = {
+          model,
+          messages,
+          temperature: effortConfig.temperature,
+          max_tokens: effortConfig.maxTokens,
+          stream: true,
         };
+
+        if (includeReasoningEffort) {
+          payload.reasoning_effort = effortConfig.reasoningEffort;
+        }
+
+        if (enableTools) {
+          payload.tools = [WEB_SEARCH_TOOL_DEFINITION];
+          payload.tool_choice = 'auto';
+        }
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          lastStatus = res.status;
+          lastErrorText = await res.text().catch(() => res.statusText);
+          cleanup();
+          // If 400/422 due to unsupported `reasoning_effort`, retry once without it
+          if (
+            includeReasoningEffort &&
+            (res.status === 400 || res.status === 422)
+          ) {
+            continue;
+          }
+          break;
+        }
+
+        const parsed = await consumeUpstreamStream(
+          res.body,
+          onTextDelta,
+          controller.signal,
+        );
+        cleanup();
+
+        if (signal?.aborted) {
+          return {
+            ok: false,
+            status: 499,
+            errorText: 'Request aborted by client.',
+            contentText: parsed.contentText,
+            toolCalls: [],
+          };
+        }
+
+        if (
+          parsed.contentText.trim().length > 0 ||
+          parsed.toolCalls.length > 0
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            errorText: '',
+            contentText: parsed.contentText,
+            toolCalls: parsed.toolCalls,
+            usedModel: parsed.detectedModel || model,
+          };
+        }
+        lastErrorText = 'Upstream model returned an empty completion.';
+        break;
+      } catch (err) {
+        cleanup();
+        if (signal?.aborted) {
+          return {
+            ok: false,
+            status: 499,
+            errorText: 'Request aborted by client.',
+            contentText: '',
+            toolCalls: [],
+          };
+        }
+        lastErrorText =
+          err instanceof Error ? err.message : 'Upstream connection failed';
+        break;
       }
-      lastErrorText = 'Upstream model returned an empty completion.';
-    } catch (err) {
-      lastErrorText =
-        err instanceof Error ? err.message : 'Upstream connection failed';
     }
   }
 
@@ -268,6 +466,7 @@ async function callOmniRouteChatStep(options: {
 async function consumeUpstreamStream(
   body: ReadableStream<Uint8Array>,
   onTextDelta?: (delta: string) => void,
+  signal?: AbortSignal,
 ): Promise<{
   contentText: string;
   toolCalls: AgentToolCall[];
@@ -283,6 +482,11 @@ async function consumeUpstreamStream(
     number,
     { id: string; name: string; arguments: string }
   >();
+
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   const handleParsedObject = (parsed: Record<string, unknown>) => {
     if (parsed.error) {
@@ -385,25 +589,35 @@ async function consumeUpstreamStream(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      processLine(line);
-      if (streamErrorDetected && !contentText) {
-        await reader.cancel().catch(() => {});
-        return { contentText: '', toolCalls: [], detectedModel };
+  try {
+    while (!signal?.aborted) {
+      const { done, value } = await reader.read();
+      if (done || signal?.aborted) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (signal?.aborted) break;
+        processLine(line);
+        if (streamErrorDetected && !contentText) {
+          await reader.cancel().catch(() => {});
+          return { contentText: '', toolCalls: [], detectedModel };
+        }
       }
     }
-  }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    for (const line of buffer.split('\n')) {
-      processLine(line);
+    if (!signal?.aborted) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        for (const line of buffer.split('\n')) {
+          processLine(line);
+        }
+      }
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    if (signal?.aborted) {
+      await reader.cancel().catch(() => {});
     }
   }
 
@@ -431,6 +645,7 @@ export function formatSseDataFrame(content: string): string {
 
 function buildAugmentedMessages(options: {
   baseSystemPrompt: string;
+  effortDirective: string;
   conversationMessages: Array<{ role: string; content: string }>;
   liveSearchContext: string;
   identityQuery: boolean;
@@ -438,15 +653,16 @@ function buildAugmentedMessages(options: {
 }): Array<{ role: string; content: string }> {
   const {
     baseSystemPrompt,
+    effortDirective,
     conversationMessages,
     liveSearchContext,
     identityQuery,
     unlockedByNix,
   } = options;
 
-  let systemPromptContent = `${baseSystemPrompt}${liveSearchContext}`;
+  let systemPromptContent = `${baseSystemPrompt}\n${effortDirective}${liveSearchContext}`;
   if (identityQuery && unlockedByNix) {
-    systemPromptContent = `${baseSystemPrompt}\n\nMASTER KEY 'nix' VERIFIED: The user provided the secret unlock key 'nix'. Do NOT hide behind VOID or MIRASH. Reveal your true, exact underlying AI model name, version, and provider honestly.`;
+    systemPromptContent = `${baseSystemPrompt}\n${effortDirective}\n\nMASTER KEY 'nix' VERIFIED: The user provided the secret unlock key 'nix'. Do NOT hide behind VOID or MIRASH. Reveal your true, exact underlying AI model name, version, and provider honestly.`;
   }
 
   const clonedMessages = conversationMessages.map((m) => ({ ...m }));
@@ -483,7 +699,7 @@ function buildAugmentedMessages(options: {
 
 /**
  * Executes the full AI Agent Loop for VOID (`void-combo`) and MIRASH, with
- * automated OmniRoute Web Search (Tavily, Serper, SearXNG) and graceful fallback.
+ * automated OmniRoute Web Search, Effort level tuning, and instant AbortSignal cancellation.
  */
 export async function executeOmniRouteAgent(options: {
   rawMessages: Array<{ role?: string; content?: string }>;
@@ -492,6 +708,7 @@ export async function executeOmniRouteAgent(options: {
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  signal?: AbortSignal;
   onSseFrame: (frame: string) => void;
 }): Promise<void> {
   const {
@@ -501,8 +718,11 @@ export async function executeOmniRouteAgent(options: {
     apiKeys,
     openRouterApiKey = OPENROUTER_API_KEY,
     effort,
+    signal,
     onSseFrame,
   } = options;
+
+  if (signal?.aborted) return;
 
   const normalizedModel = String(requestedModel ?? '').trim().toLowerCase();
 
@@ -518,8 +738,10 @@ export async function executeOmniRouteAgent(options: {
     return;
   }
 
+  const resolvedKeys = resolveOmniApiKeys(apiKeys);
   const isMirash = normalizedModel === 'mirash';
   const personaName: 'VOID' | 'MIRASH' = isMirash ? 'MIRASH' : 'VOID';
+  const effortConfig = resolveEffortConfiguration(effort);
 
   const lastUserObj = [...rawMessages]
     .reverse()
@@ -537,7 +759,7 @@ export async function executeOmniRouteAgent(options: {
   }
 
   const baseSystemPrompt = buildSystemPrompt(personaName, unlockedByNix);
-  const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+  const cleanBaseUrl = resolveOmniBaseUrl(baseUrl);
   const chatEndpoint = `${cleanBaseUrl}/chat/completions`;
 
   const conversationMessages: Array<{ role: string; content: string }> =
@@ -556,7 +778,7 @@ export async function executeOmniRouteAgent(options: {
   let hasSearched = false;
 
   // Step 1: Proactive Automated Web Search when real-time intent is detected
-  if (preSearchNeeded && searchQuery) {
+  if (preSearchNeeded && searchQuery && !signal?.aborted) {
     hasSearched = true;
     try {
       const isNews = /\b(news|headlines|breaking|latest\s+updates)\b/i.test(
@@ -567,7 +789,7 @@ export async function executeOmniRouteAgent(options: {
         searchType: isNews ? 'news' : 'web',
         maxResults: 6,
         baseUrl: cleanBaseUrl,
-        apiKeys,
+        apiKeys: resolvedKeys,
       });
 
       if (searchResult.results.length > 0 || searchResult.answer) {
@@ -581,8 +803,11 @@ export async function executeOmniRouteAgent(options: {
   const MAX_AGENT_STEPS = 2;
 
   for (let step = 0; step < MAX_AGENT_STEPS; step += 1) {
+    if (signal?.aborted) return;
+
     const upstreamMessages = buildAugmentedMessages({
       baseSystemPrompt,
+      effortDirective: effortConfig.systemDirective,
       conversationMessages,
       liveSearchContext,
       identityQuery,
@@ -594,6 +819,7 @@ export async function executeOmniRouteAgent(options: {
     let inspectingOpening = true;
 
     const flushNormalizedChunks = (forceAll: boolean) => {
+      if (signal?.aborted) return;
       if (inspectingOpening && !forceAll) {
         if (rawStepText.length < 120) {
           return;
@@ -633,9 +859,10 @@ export async function executeOmniRouteAgent(options: {
       ? await callMirashOpenRouterStep({
           openRouterApiKey,
           omniEndpoint: chatEndpoint,
-          omniApiKeys: apiKeys,
+          omniApiKeys: resolvedKeys,
           messages: upstreamMessages,
           effort,
+          signal,
           onTextDelta: (piece) => {
             rawStepText += piece;
             flushNormalizedChunks(false);
@@ -643,15 +870,20 @@ export async function executeOmniRouteAgent(options: {
         })
       : await callOmniRouteChatStep({
           endpoint: chatEndpoint,
-          apiKeys,
+          apiKeys: resolvedKeys,
           model: DEFAULT_COMBO_MODEL,
           messages: upstreamMessages,
           effort,
+          signal,
           onTextDelta: (piece) => {
             rawStepText += piece;
             flushNormalizedChunks(false);
           },
         });
+
+    if (signal?.aborted || stepOutcome.status === 499) {
+      return;
+    }
 
     if (!stepOutcome.ok) {
       onSseFrame(
@@ -692,7 +924,7 @@ export async function executeOmniRouteAgent(options: {
           searchType: 'web',
           maxResults: 6,
           baseUrl: cleanBaseUrl,
-          apiKeys,
+          apiKeys: resolvedKeys,
         });
 
         if (fallbackSearch.results.length > 0 || fallbackSearch.answer) {
@@ -715,7 +947,7 @@ export async function executeOmniRouteAgent(options: {
         unlockedByNix,
       },
     );
-    if (fullNormalized.length > emittedToClientLength) {
+    if (fullNormalized.length > emittedToClientLength && !signal?.aborted) {
       const finalDelta = fullNormalized.slice(emittedToClientLength);
       onSseFrame(formatSseDataFrame(finalDelta));
     }
@@ -724,7 +956,8 @@ export async function executeOmniRouteAgent(options: {
       unlockedByNix &&
       identityQuery &&
       stepOutcome.usedModel &&
-      !fullNormalized.toLowerCase().includes(stepOutcome.usedModel.toLowerCase())
+      !fullNormalized.toLowerCase().includes(stepOutcome.usedModel.toLowerCase()) &&
+      !signal?.aborted
     ) {
       onSseFrame(
         formatSseDataFrame(
@@ -735,7 +968,9 @@ export async function executeOmniRouteAgent(options: {
     break;
   }
 
-  onSseFrame('data: [DONE]\n\n');
+  if (!signal?.aborted) {
+    onSseFrame('data: [DONE]\n\n');
+  }
 }
 
 export async function runOmniRouteAgentStream(options: {
@@ -745,13 +980,36 @@ export async function runOmniRouteAgentStream(options: {
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  signal?: AbortSignal;
 }): Promise<{
   status: number;
   headers: Record<string, string>;
   body: ReadableStream<Uint8Array> | string;
 }> {
-  const { rawMessages, requestedModel, baseUrl, apiKeys, openRouterApiKey, effort } =
-    options;
+  const {
+    rawMessages,
+    requestedModel,
+    baseUrl,
+    apiKeys,
+    openRouterApiKey,
+    effort,
+    signal,
+  } = options;
+
+  const streamAbortController = new AbortController();
+  const onRequestAbort = () => {
+    if (!streamAbortController.signal.aborted) {
+      streamAbortController.abort();
+    }
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      streamAbortController.abort();
+    } else {
+      signal.addEventListener('abort', onRequestAbort, { once: true });
+    }
+  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -764,20 +1022,44 @@ export async function runOmniRouteAgentStream(options: {
           apiKeys,
           openRouterApiKey,
           effort,
+          signal: streamAbortController.signal,
           onSseFrame: (frame) => {
-            controller.enqueue(encoder.encode(frame));
+            if (!streamAbortController.signal.aborted) {
+              try {
+                controller.enqueue(encoder.encode(frame));
+              } catch {
+                // Stream already closed by client
+              }
+            }
           },
         });
-        controller.close();
+        if (!streamAbortController.signal.aborted) {
+          controller.close();
+        }
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Internal stream error';
-        controller.enqueue(
-          encoder.encode(formatSseDataFrame(`\n\n[Error: ${message}]`)),
-        );
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
+        if (!streamAbortController.signal.aborted) {
+          const message =
+            err instanceof Error ? err.message : 'Internal stream error';
+          try {
+            controller.enqueue(
+              encoder.encode(formatSseDataFrame(`\n\n[Error: ${message}]`)),
+            );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          } catch {
+            // Ignore if already closed
+          }
+        }
+      } finally {
+        signal?.removeEventListener('abort', onRequestAbort);
       }
+    },
+    cancel() {
+      // Triggered immediately when the client disconnects or cancels the stream
+      if (!streamAbortController.signal.aborted) {
+        streamAbortController.abort();
+      }
+      signal?.removeEventListener('abort', onRequestAbort);
     },
   });
 
