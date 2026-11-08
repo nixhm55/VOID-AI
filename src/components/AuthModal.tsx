@@ -19,9 +19,52 @@ import {
 import { isSupabaseConfigured } from '../lib/supabase';
 import './AuthModal.css';
 
+export interface GuestProfileInfo {
+  name: string;
+  age: string;
+}
+
+const GUEST_PROFILE_STORAGE_KEY = 'void_ai_guest_profile_v1';
+
+export function loadGuestProfile(): GuestProfileInfo | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(GUEST_PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<GuestProfileInfo>;
+    if (typeof parsed.name === 'string' && parsed.name.trim()) {
+      return {
+        name: parsed.name.trim(),
+        age: typeof parsed.age === 'string' ? parsed.age.trim() : '',
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveGuestProfile(profile: GuestProfileInfo | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!profile) {
+      window.localStorage.removeItem(GUEST_PROFILE_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(
+        GUEST_PROFILE_STORAGE_KEY,
+        JSON.stringify(profile),
+      );
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 interface AuthModalProps {
   open: boolean;
   user: User | null;
+  guestProfile?: GuestProfileInfo | null;
+  onUpdateGuestProfile?: (profile: GuestProfileInfo) => void;
   onClose: () => void;
   onSignOut: () => Promise<void>;
 }
@@ -143,6 +186,8 @@ function LockIcon() {
 export default function AuthModal({
   open,
   user,
+  guestProfile,
+  onUpdateGuestProfile,
   onClose,
   onSignOut,
 }: AuthModalProps) {
@@ -169,7 +214,19 @@ export default function AuthModal({
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
+  // Guest Onboarding Step (asks for Name & Age in the exact same login page design!)
+  const [guestStepOpen, setGuestStepOpen] = useState(false);
+  const [guestName, setGuestName] = useState(guestProfile?.name ?? '');
+  const [guestAge, setGuestAge] = useState(guestProfile?.age ?? '');
+
   const configured = isSupabaseConfigured();
+
+  useEffect(() => {
+    if (guestProfile) {
+      setGuestName(guestProfile.name);
+      setGuestAge(guestProfile.age);
+    }
+  }, [guestProfile]);
 
   const filteredCountries = useMemo(() => {
     const q = countryQuery.trim().toLowerCase();
@@ -230,6 +287,7 @@ export default function AuthModal({
     setShowSignUpPasswordStep(false);
     setCountryDropdownOpen(false);
     setCountryQuery('');
+    setGuestStepOpen(false);
   }, [open]);
 
   if (!open) return null;
@@ -242,6 +300,7 @@ export default function AuthModal({
     setCodeSent(false);
     setShowSignUpPasswordStep(false);
     setCountryDropdownOpen(false);
+    setGuestStepOpen(false);
   };
 
   const handleOAuth = async (provider: 'google' | 'github') => {
@@ -302,10 +361,8 @@ export default function AuthModal({
     setError('');
     setNotice('');
 
-    // Step 1 of Sign Up: If user hasn't opened the password/verification step yet
     if (activeTab === 'signup' && !codeSent && !showSignUpPasswordStep) {
       if (!email.trim() && formattedE164Phone) {
-        // Phone-only sign up via SMS OTP
         await handleSendOtpFallback('phone');
         return;
       }
@@ -359,7 +416,6 @@ export default function AuthModal({
         return;
       }
 
-      // Sign in tab
       if (signInMethod === 'phone') {
         if (!formattedE164Phone) {
           throw new Error('Please enter your phone number.');
@@ -402,12 +458,39 @@ export default function AuthModal({
     }
   };
 
-  const handleGuest = async () => {
+  const handleOpenGuestStep = () => {
+    setError('');
+    setNotice('');
+    setGuestStepOpen(true);
+  };
+
+  const handleCompleteGuestSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmedName = guestName.trim();
+    const trimmedAge = guestAge.trim();
+
+    if (!trimmedName) {
+      setError('Please enter your name to continue as guest.');
+      return;
+    }
+    if (!trimmedAge || Number.isNaN(Number(trimmedAge)) || Number(trimmedAge) < 1) {
+      setError('Please enter your valid age.');
+      return;
+    }
+
     setBusy(true);
     setError('');
     setNotice('');
     try {
-      await continueAsGuest();
+      const profile: GuestProfileInfo = {
+        name: trimmedName,
+        age: trimmedAge,
+      };
+      saveGuestProfile(profile);
+      onUpdateGuestProfile?.(profile);
+      if (configured && !user) {
+        await continueAsGuest().catch(() => {});
+      }
       onClose();
     } catch (err) {
       setError(
@@ -431,9 +514,20 @@ export default function AuthModal({
     }
   };
 
+  const meta = user?.user_metadata as Record<string, unknown> | undefined;
+  const userFullName =
+    (typeof meta?.full_name === 'string' && meta.full_name.trim()) ||
+    (typeof meta?.name === 'string' && meta.name.trim()) ||
+    '';
+  const userAvatar =
+    (typeof meta?.avatar_url === 'string' && meta.avatar_url.trim()) ||
+    (typeof meta?.picture === 'string' && meta.picture.trim()) ||
+    '';
+
   const accountName =
-    user?.email ??
-    user?.phone ??
+    userFullName ||
+    user?.email ||
+    user?.phone ||
     (user?.is_anonymous ? 'Guest session' : 'Signed in');
 
   return (
@@ -443,7 +537,7 @@ export default function AuthModal({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      {/* Main Dark Morphism Auth Card (No rainbow background) */}
+      {/* Main Dark Morphism Auth Card */}
       <div
         ref={dialogRef}
         role="dialog"
@@ -495,15 +589,33 @@ export default function AuthModal({
               </button>
             </div>
 
-            <h2
-              id="auth-modal-title"
-              className="mt-6 text-[22px] font-semibold tracking-[-0.02em] text-white"
-            >
-              You&apos;re signed in
-            </h2>
-            <p className="mt-1 truncate text-[13.5px] text-[#8e8e96]">
-              {accountName}
-            </p>
+            <div className="mt-6 flex items-center gap-3.5">
+              {userAvatar ? (
+                <img
+                  src={userAvatar}
+                  alt={accountName}
+                  className="h-12 w-12 rounded-full border border-white/15 object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/10 text-lg font-semibold text-white">
+                  {accountName.charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <h2
+                  id="auth-modal-title"
+                  className="truncate text-[20px] font-semibold tracking-[-0.02em] text-white"
+                >
+                  {accountName}
+                </h2>
+                {user.email ? (
+                  <p className="truncate text-[13px] text-[#8e8e96]">
+                    {user.email}
+                  </p>
+                ) : null}
+              </div>
+            </div>
 
             <div className="mt-6 flex flex-col gap-3">
               <button
@@ -532,10 +644,142 @@ export default function AuthModal({
               </p>
             ) : null}
           </div>
-        ) : (
-          /* ── Sign up / Sign in Morphism View (Exact Reference Match) ── */
+        ) : guestStepOpen ? (
+          /* ── Guest Onboarding Step (Exact Same Morphism Design: Asks for Name & Age) ── */
           <div>
-            {/* Top Bar: Pill Segmented Switch (Sign up / Sign in) + Close Button */}
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => {
+                  setError('');
+                  setGuestStepOpen(false);
+                }}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium text-[#9e9ea6] transition-colors hover:bg-white/[0.06] hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  className="h-3.5 w-3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+                <span>Back</span>
+              </button>
+
+              <button
+                type="button"
+                className="auth-close-btn inline-flex h-9 w-9 items-center justify-center rounded-full text-[#9e9ea6] transition-all hover:text-white disabled:opacity-40"
+                aria-label="Close guest dialog"
+                onClick={onClose}
+                disabled={busy}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  className="h-4 w-4 fill-none stroke-current"
+                  strokeLinecap="round"
+                  strokeWidth="2"
+                >
+                  <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <h2
+              id="auth-modal-title"
+              className="mt-6 mb-1.5 text-[22px] font-semibold tracking-[-0.02em] text-white"
+            >
+              Continue as Guest
+            </h2>
+            <p className="mb-5 text-[13px] text-[#8e8e96]">
+              Tell us your name and age to personalize your workspace.
+            </p>
+
+            <form
+              className="flex flex-col gap-3"
+              onSubmit={(e) => void handleCompleteGuestSubmit(e)}
+            >
+              <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                <svg
+                  viewBox="0 0 24 24"
+                  className="h-[17px] w-[17px] shrink-0 text-[#6c6c74]"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+                <input
+                  type="text"
+                  autoComplete="given-name"
+                  placeholder="Enter your name"
+                  aria-label="Your name"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  disabled={busy}
+                  autoFocus
+                  className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                />
+              </div>
+
+              <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
+                <svg
+                  viewBox="0 0 24 24"
+                  className="h-[17px] w-[17px] shrink-0 text-[#6c6c74]"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                  <line x1="16" y1="2" x2="16" y2="6" />
+                  <line x1="8" y1="2" x2="8" y2="6" />
+                  <line x1="3" y1="10" x2="21" y2="10" />
+                </svg>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={120}
+                  placeholder="Enter your age"
+                  aria-label="Your age"
+                  value={guestAge}
+                  onChange={(e) => setGuestAge(e.target.value)}
+                  disabled={busy}
+                  className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="auth-primary-btn mt-2 flex h-[46px] w-full items-center justify-center rounded-[12px] text-[14px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {busy ? 'Starting session…' : 'Start chatting'}
+              </button>
+            </form>
+
+            {error ? (
+              <p
+                className="mt-3.5 rounded-xl border border-red-400/20 bg-red-500/10 px-3.5 py-2.5 text-center text-xs leading-relaxed text-red-200"
+                role="alert"
+              >
+                {error}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          /* ── Sign up / Sign in Morphism View ── */
+          <div>
             <div className="flex items-center justify-between">
               <div
                 className="auth-pill-track inline-flex items-center rounded-full p-1"
@@ -589,7 +833,6 @@ export default function AuthModal({
               </button>
             </div>
 
-            {/* Section Title */}
             <h2
               id="auth-modal-title"
               className="mt-6 mb-5 text-[22px] font-semibold tracking-[-0.02em] text-white"
@@ -618,14 +861,12 @@ export default function AuthModal({
               </div>
             ) : null}
 
-            {/* Form */}
             <form
               className="flex flex-col gap-3"
               onSubmit={(event) => void handleSubmit(event)}
             >
               {activeTab === 'signup' ? (
                 <>
-                  {/* Row 1: First Name & Last Name */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="auth-input-shell flex h-[46px] items-center rounded-[11px] px-3.5">
                       <input
@@ -653,7 +894,6 @@ export default function AuthModal({
                     </div>
                   </div>
 
-                  {/* Row 2: Email Input with Envelope Icon */}
                   <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
                     <EnvelopeIcon />
                     <input
@@ -668,7 +908,6 @@ export default function AuthModal({
                     />
                   </div>
 
-                  {/* Row 3: Country Flag Dropdown + Phone Number */}
                   <div
                     ref={countryMenuRef}
                     className="auth-input-shell relative flex h-[46px] items-center rounded-[11px] px-3"
@@ -715,9 +954,8 @@ export default function AuthModal({
                       className="h-full w-full bg-transparent text-[14px] text-white placeholder:text-[#66666e] outline-none"
                     />
 
-                    {/* Country Selector Dropdown */}
                     {countryDropdownOpen ? (
-                      <div className=" absolute left-0 top-[calc(100%+6px)] z-30 w-full overflow-hidden rounded-[14px] border border-white/[0.1] bg-[#18181c] shadow-[0_18px_50px_rgba(0,0,0,0.85)]">
+                      <div className="absolute left-0 top-[calc(100%+6px)] z-30 w-full overflow-hidden rounded-[14px] border border-white/[0.1] bg-[#18181c] shadow-[0_18px_50px_rgba(0,0,0,0.85)]">
                         <div className="border-b border-white/[0.07] p-2">
                           <input
                             type="text"
@@ -770,7 +1008,6 @@ export default function AuthModal({
                     ) : null}
                   </div>
 
-                  {/* Step 2 on Sign Up: Password or One-Time Code */}
                   {showSignUpPasswordStep && !codeSent ? (
                     <div className="flex flex-col gap-2 pt-0.5">
                       <div className="auth-input-shell flex h-[46px] items-center gap-2.5 rounded-[11px] px-3.5">
@@ -813,7 +1050,6 @@ export default function AuthModal({
                   ) : null}
                 </>
               ) : (
-                /* ── Sign In Tab Fields ── */
                 <>
                   {signInMethod === 'phone' ? (
                     <div
@@ -985,7 +1221,6 @@ export default function AuthModal({
                 </>
               )}
 
-              {/* One-Time Verification Code Input (when OTP sent) */}
               {codeSent ? (
                 <div className="flex flex-col gap-2">
                   <div className="auth-input-shell flex h-[46px] items-center rounded-[11px] px-3.5">
@@ -1019,7 +1254,6 @@ export default function AuthModal({
                 </div>
               ) : null}
 
-              {/* Primary CTA Button */}
               <button
                 type="submit"
                 disabled={busy || !configured}
@@ -1055,7 +1289,6 @@ export default function AuthModal({
               </p>
             ) : null}
 
-            {/* Divider: OR SIGN IN WITH */}
             <div className="my-5 flex items-center gap-3">
               <span className="h-px flex-1 bg-white/[0.06]" />
               <span className="text-[10.5px] font-semibold tracking-[0.08em] text-[#5c5c66] uppercase">
@@ -1064,7 +1297,6 @@ export default function AuthModal({
               <span className="h-px flex-1 bg-white/[0.06]" />
             </div>
 
-            {/* Social Buttons: Google (left) & GitHub (right, replacing Apple) */}
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -1086,17 +1318,17 @@ export default function AuthModal({
               </button>
             </div>
 
-            {/* Footer */}
             <div className="mt-5 flex flex-col items-center gap-2 text-center">
               <p className="text-[11.5px] text-[#66666e]">
                 By creating an account, you agree to our Terms &amp; Service
               </p>
-              {!user ? (
+              {/* Hide "Continue as guest" when the user is already in a Guest session */}
+              {!guestProfile && !user?.is_anonymous ? (
                 <button
                   type="button"
-                  onClick={() => void handleGuest()}
-                  disabled={busy || !configured}
-                  className="text-[11.5px] font-medium text-[#8a8a93] transition-colors hover:text-white disabled:opacity-40"
+                  onClick={handleOpenGuestStep}
+                  disabled={busy}
+                  className="text-[12px] font-medium text-[#9e9ea8] transition-colors hover:text-white disabled:opacity-40"
                 >
                   Continue as guest →
                 </button>

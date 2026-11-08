@@ -22,7 +22,7 @@ function metadataAttachments(metadata: Json): string[] | undefined {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
     return undefined;
   }
-  const attachments = metadata.attachments;
+  const attachments = (metadata as Record<string, unknown>).attachments;
   return Array.isArray(attachments)
     ? attachments.filter((item): item is string => typeof item === 'string')
     : undefined;
@@ -34,18 +34,28 @@ function mergeSessionLists(...lists: ChatSession[][]): ChatSession[] {
     for (const session of list) {
       const previous = byId.get(session.id);
       if (!previous) {
-        byId.set(session.id, session);
+        byId.set(session.id, {
+          ...session,
+          agentMode:
+            session.agentMode ??
+            session.messages.some((m) => Boolean(m.agentMode)),
+        });
         continue;
       }
 
       const messages = new Map(previous.messages.map((message) => [message.id, message]));
       for (const message of session.messages) messages.set(message.id, message);
+      const mergedMessages = [...messages.values()].sort(
+        (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+      );
       byId.set(session.id, {
         ...previous,
         ...session,
-        messages: [...messages.values()].sort(
-          (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
-        ),
+        messages: mergedMessages,
+        agentMode:
+          previous.agentMode ??
+          session.agentMode ??
+          mergedMessages.some((m) => Boolean(m.agentMode)),
         pinned: previous.pinned || session.pinned,
         createdAt: Math.min(previous.createdAt, session.createdAt),
         updatedAt: Math.max(previous.updatedAt, session.updatedAt),
@@ -62,16 +72,19 @@ function rowsToSessions(
   const messagesByConversation = new Map<string, ChatMessage[]>();
   for (const row of messages) {
     const metadata = row.metadata;
+    const isMetaObj =
+      Boolean(metadata) && typeof metadata === 'object' && !Array.isArray(metadata);
+    const metaRecord = isMetaObj ? (metadata as Record<string, unknown>) : {};
     const messageId =
-      metadata && typeof metadata === 'object' && !Array.isArray(metadata) &&
-      typeof metadata.client_message_id === 'string'
-        ? metadata.client_message_id
+      typeof metaRecord.client_message_id === 'string'
+        ? metaRecord.client_message_id
         : row.client_id ?? String(row.id);
     const mapped: ChatMessage = {
       id: messageId,
       role: row.role === 'user' ? 'user' : 'assistant',
       text: row.content,
       attachments: metadataAttachments(metadata),
+      agentMode: Boolean(metaRecord.agent_mode),
       createdAt: new Date(row.created_at).getTime(),
     };
     const bucket = messagesByConversation.get(row.conversation_id) ?? [];
@@ -79,16 +92,20 @@ function rowsToSessions(
     messagesByConversation.set(row.conversation_id, bucket);
   }
 
-  return conversations.map((row) => ({
-    id: row.client_id ?? row.id,
-    title: row.title,
-    messages: (messagesByConversation.get(row.id) ?? []).sort(
+  return conversations.map((row) => {
+    const sortedMsgs = (messagesByConversation.get(row.id) ?? []).sort(
       (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
-    ),
-    pinned: row.pinned,
-    createdAt: new Date(row.created_at).getTime(),
-    updatedAt: new Date(row.updated_at).getTime(),
-  }));
+    );
+    return {
+      id: row.client_id ?? row.id,
+      title: row.title,
+      messages: sortedMsgs,
+      agentMode: sortedMsgs.some((m) => Boolean(m.agentMode)),
+      pinned: row.pinned,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    };
+  });
 }
 
 async function readRemoteSessions(userId: string): Promise<ChatSession[]> {
@@ -167,6 +184,7 @@ async function persistSession(
       metadata: {
         client_message_id: message.id,
         attachments: message.attachments ?? [],
+        agent_mode: Boolean(message.agentMode ?? session.agentMode),
       } as Json,
       created_at: new Date(message.createdAt ?? session.updatedAt).toISOString(),
     }));
@@ -228,11 +246,6 @@ export async function persistChangedChatSessions(
   }
 }
 
-/**
- * Uploads the legacy browser cache before reading cloud history. Stable client
- * ids make retries safe; the legacy cache is removed only after every row has
- * been accepted by Postgres.
- */
 export async function loadAndMigrateChatHistory(
   userId: string,
 ): Promise<{ sessions: ChatSession[]; warning: string | null }> {

@@ -8,6 +8,7 @@ import ttsHandler from './api/tts';
 import transcribeHandler from './api/transcribe';
 import embeddingsHandler from './api/embeddings';
 import moderationHandler from './api/moderation';
+import terminalHandler from './api/terminal';
 
 /**
  * Mounts the root `/api/*.ts` Vercel Serverless Functions during local Vite
@@ -31,6 +32,7 @@ function vercelServerlessDevAdapter(env: Record<string, string>): Plugin {
     '/api/transcribe': transcribeHandler,
     '/api/embeddings': embeddingsHandler,
     '/api/moderation': moderationHandler,
+    '/api/terminal': terminalHandler,
   };
 
   const attach = (middlewares: {

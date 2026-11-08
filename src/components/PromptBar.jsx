@@ -28,11 +28,17 @@ const EASE_IN_OUT = [0.77, 0, 0.175, 1];
 const LINE = 22;
 const EDGE = 11;
 
+// Microphone auto-off silence rules:
+// - 6 seconds (6000ms) if mic is turned on and no word has been spoken yet
+// - 20 seconds (20000ms) after the user speaks at least one word (so 5s/10s thinking pauses never cut off)
+const INITIAL_NO_SPEECH_TIMEOUT_MS = 6000;
+const POST_SPEECH_SILENCE_TIMEOUT_MS = 20000;
+
 // Strictly allow ONLY English (Latin), Malayalam (\u0D00-\u0D7F), Hindi/Devanagari (\u0900-\u097F), numbers, and punctuation
 const DISALLOWED_SCRIPT_REGEX =
   /[^\u0020-\u007E\u00A0-\u00FF\u0900-\u097F\u0D00-\u0D7F\u200C\u200D\u2013-\u2026]+/g;
 
-// Collapse accidental duplicate words or repeated phrase halves (e.g. "സുഖമാണോ സുഖമാണോ" -> "സുഖമാണോ")
+// Collapse accidental duplicate words or repeated phrase halves
 const collapseRepeatedSpeech = raw => {
   const cleaned = String(raw ?? '')
     .replace(DISALLOWED_SCRIPT_REGEX, ' ')
@@ -63,7 +69,7 @@ const cleanSpeechTranscript = text => collapseRepeatedSpeech(text);
 
 // Trilingual voice configuration for Default (Coding Engine) mode
 const SPEECH_LANGS = [
-  { code: 'en-US', short: 'EN', apiLang: 'en', label: 'English (Default)' },
+  { code: 'en-IN', short: 'EN', apiLang: 'en', label: 'English (Default)' },
   { code: 'ml-IN', short: 'ML', apiLang: 'ml', label: 'മലയാളം (Direct)' },
   { code: 'hi-IN', short: 'HI', apiLang: 'hi', label: 'हिन्दी (Direct)' }
 ];
@@ -73,6 +79,53 @@ const MALAYALAM_ROMAN_CUE_REGEX =
 
 const HINDI_ROMAN_CUE_REGEX =
   /\b(?:mein|mujhe|mera|meri|mere|tum|tumhara|aap|aapka|kya|kaise|kaisa|kaisi|kahan|kab|kyun|kyon|hai|hain|hoon|nahi|nahin|haan|accha|achha|theek|thik|bhai|yaar|madad|chahiye|karo|karna|batao|bataiye|dekho|suno|samajh|haal|mausam)\b/i;
+
+async function transliterateClientFast(text, targetLang) {
+  const cleaned = cleanSpeechTranscript(text);
+  if (!cleaned || targetLang === 'en') return cleaned;
+  const itc = targetLang === 'ml' ? 'ml-t-i0-und' : 'hi-t-i0-und';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 700);
+  try {
+    const url = `https://inputtools.google.com/request?text=${encodeURIComponent(cleaned)}&itc=${itc}&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (
+        Array.isArray(data) &&
+        data[0] === 'SUCCESS' &&
+        Array.isArray(data[1]) &&
+        Array.isArray(data[1][0]) &&
+        Array.isArray(data[1][0][1]) &&
+        typeof data[1][0][1][0] === 'string'
+      ) {
+        return cleanSpeechTranscript(data[1][0][1][0]) || cleaned;
+      }
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+  return cleaned;
+}
+
+const SHARE_SCREEN_ICON = (
+  <svg
+    width="15"
+    height="15"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.9"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+    <line x1="8" y1="21" x2="16" y2="21" />
+    <line x1="12" y1="17" x2="12" y2="21" />
+    <polyline points="9 10 12 7 15 10" />
+  </svg>
+);
 
 const DEFAULT_SOURCES = [
   {
@@ -95,6 +148,15 @@ const DEFAULT_SOURCES = [
   { key: 'mail', name: 'Mail', description: 'Read and draft mail', icon: Mail01Icon },
   { key: 'calendar', name: 'Calendar', description: 'Events and availability', icon: Calendar03Icon }
 ];
+
+const AGENT_SHARE_SCREEN_SOURCE = {
+  key: 'share-screen',
+  name: 'Share screen',
+  description: 'Capture and share your screen with Agent',
+  icon: SHARE_SCREEN_ICON,
+  shareScreen: true
+};
+
 const DEFAULT_COMMANDS = [
   { key: 'image', name: '/image', description: 'Create an image with OmniRoute AI' },
   { key: 'summarize', name: '/summarize', description: 'Digest the thread so far' },
@@ -109,6 +171,9 @@ const DEFAULT_MODELS = [
   { key: 'mirash', name: 'MIRASH', shortName: 'MIRASH', tag: '' }
 ];
 const DEFAULT_EFFORTS = ['Low', 'Medium', 'High', 'Extra', 'Max'];
+
+/** @type {string[]} */
+const EMPTY_CONNECTED_FOLDERS = [];
 
 const blobToBase64 = blob =>
   new Promise((resolve, reject) => {
@@ -260,18 +325,22 @@ export default function PromptBar({
   efforts = DEFAULT_EFFORTS,
   defaultEffort = '',
   onEffortChange,
+  agentMode = false,
+  connectedFolders = EMPTY_CONNECTED_FOLDERS,
+  onConnectFolder = () => {},
+  onDisconnectFolder = (_folderName = '') => {},
   busy = false,
   onSend,
   onStop,
   onAttach,
   onDictate,
-  background = '#27272a',
+  background = '#10121a',
   color = '#f5f5f5',
-  menuBackground = '#323236',
+  menuBackground = '#1e2029',
   sparkColor = '#b39dff',
   sparkBoost = 1,
-  width = 760,
-  radius = 16,
+  width = 720,
+  radius = 22,
   maxRows = 5,
   morphDuration = 240,
   squash = 0.12,
@@ -292,6 +361,8 @@ export default function PromptBar({
   const lastOpen = useRef(null);
   const dictation = useRef(0);
   const recognitionRef = useRef(null);
+  const silenceTimerRef = useRef(null);
+  const hasSpokenWordInSessionRef = useRef(false);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -305,8 +376,17 @@ export default function PromptBar({
   const interimConvertSeqRef = useRef(0);
   const pendingConversionsRef = useRef([]);
   const shouldKeepListeningRef = useRef(false);
+  const stopRecognitionRef = useRef(() => {});
   const latest = useRef({});
-  latest.current = { onSend, onStop, onAttach, onDictate, onEffortChange };
+  latest.current = {
+    onSend,
+    onStop,
+    onAttach,
+    onDictate,
+    onEffortChange,
+    onConnectFolder,
+    onDisconnectFolder
+  };
 
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -314,6 +394,7 @@ export default function PromptBar({
   const [plusOpen, setPlusOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [effortIndex, setEffortIndex] = useState(() => {
     const i = efforts.indexOf(defaultEffort);
     return i >= 0 ? i : Math.max(0, Math.floor((efforts.length - 1) / 2));
@@ -321,32 +402,37 @@ export default function PromptBar({
   const [dismissed, setDismissed] = useState(false);
   const [active, setActive] = useState(0);
   const [listening, setListening] = useState(false);
-  const [speechLang, setSpeechLang] = useState('en-US');
+  const [speechLang, setSpeechLang] = useState('en-IN');
   const [pressed, setPressed] = useState(false);
 
   // Show EN / ML / HI button ONLY when the Default (Built-in Coding Engine) is selected!
-  // When Gemini Auto-Detect or an imported GPT transcription model is selected, hide the button and use auto-detection.
   const isDefaultCodingStt = !sttModel || sttModel === 'default';
   const isOpenAiAudioStt =
     sttModel === 'gpt-4o-transcribe' ||
     sttModel === 'gpt-4o-mini-transcribe' ||
     sttModel === 'whisper-1';
 
+  // In Agent Mode ONLY, add "Share screen" at the very bottom of the + menu
+  const effectiveSources = useMemo(
+    () => (agentMode ? [...sources, AGENT_SHARE_SCREEN_SOURCE] : sources),
+    [agentMode, sources]
+  );
+
   const model = models.find(m => m.key === modelKey) ?? models[0];
   const token = dismissed ? null : parseToken(draft);
-  const open = plusOpen ? 'at' : (token?.kind ?? (modelOpen ? 'model' : effortOpen ? 'effort' : null));
+  const open = plusOpen ? 'at' : (token?.kind ?? (modelOpen ? 'model' : (!agentMode && effortOpen) ? 'effort' : null));
   const query = plusOpen ? '' : (token?.query ?? '');
   const list = useMemo(() => {
-    if (open === 'at') return sources.filter(s => s.name.toLowerCase().includes(query));
+    if (open === 'at') return effectiveSources.filter(s => s.name.toLowerCase().includes(query));
     if (open === 'slash') return commands.filter(c => c.name.replace(/^\//, '').toLowerCase().startsWith(query));
     if (open === 'model') return models;
     return [];
-  }, [open, query, sources, commands, models]);
+  }, [open, query, effectiveSources, commands, models]);
   const cursor = Math.min(active, Math.max(0, list.length - 1));
   const canSend = draft.trim().length > 0 || attachments.length > 0;
   const armed = busy || canSend;
   const level = efforts[effortIndex] ?? '';
-  const maxed = efforts.length > 1 && effortIndex === efforts.length - 1;
+  const maxed = !agentMode && efforts.length > 1 && effortIndex === efforts.length - 1;
   const currentLangObj = SPEECH_LANGS.find(l => l.code === speechLang) ?? SPEECH_LANGS[0];
 
   const focusInput = () => inputRef.current?.focus({ preventScroll: true });
@@ -354,7 +440,30 @@ export default function PromptBar({
     setPlusOpen(false);
     setModelOpen(false);
     setEffortOpen(false);
+    setFolderMenuOpen(false);
   }, []);
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleSilenceAutoStop = useCallback(
+    hasSpokenWord => {
+      clearSilenceTimer();
+      const timeoutMs = hasSpokenWord
+        ? POST_SPEECH_SILENCE_TIMEOUT_MS
+        : INITIAL_NO_SPEECH_TIMEOUT_MS;
+      silenceTimerRef.current = setTimeout(() => {
+        if (shouldKeepListeningRef.current) {
+          stopRecognitionRef.current(true);
+        }
+      }, timeoutMs);
+    },
+    [clearSilenceTimer]
+  );
 
   const computeCombinedDraft = useCallback(() => {
     const prefix = baseDraftRef.current.trim();
@@ -377,58 +486,67 @@ export default function PromptBar({
       const now = Date.now();
       if (
         normalizedKey === lastCommittedRawRef.current &&
-        now - lastCommittedTimeRef.current < 3200
+        now - lastCommittedTimeRef.current < 2800
       ) {
         return Promise.resolve();
       }
       lastCommittedRawRef.current = normalizedKey;
       lastCommittedTimeRef.current = now;
 
-      // Immediately commit the raw/clean phrase at a known segment index so draft NEVER drops to empty
       const segIndex = committedSegmentsRef.current.length;
       committedSegmentsRef.current.push(phrase);
       currentInterimDisplayRef.current = '';
       syncDraftFromSpeechState();
 
-      // If already in native Malayalam or Hindi Unicode script, we're done!
       if (/[\u0D00-\u0D7F\u0900-\u097F]/.test(phrase)) {
         return Promise.resolve();
       }
 
-      // In Default Coding mode with EN selected, keep pure English directly in 0ms
-      if (isDefaultCodingStt && langCode === 'en-US') {
+      if (isDefaultCodingStt && (langCode === 'en-IN' || langCode === 'en-US')) {
         return Promise.resolve();
       }
 
-      const needsIndicScript =
-        (!isDefaultCodingStt &&
-          (MALAYALAM_ROMAN_CUE_REGEX.test(phrase) || HINDI_ROMAN_CUE_REGEX.test(phrase))) ||
-        (isDefaultCodingStt && (langCode === 'ml-IN' || langCode === 'hi-IN'));
-
-      if (!needsIndicScript) {
-        return Promise.resolve();
-      }
-
-      const apiLang = !isDefaultCodingStt
-        ? 'auto'
-        : langCode === 'ml-IN'
+      const targetIndicLang =
+        isDefaultCodingStt && langCode === 'ml-IN'
           ? 'ml'
-          : langCode === 'hi-IN'
+          : isDefaultCodingStt && langCode === 'hi-IN'
             ? 'hi'
-            : 'en';
+            : !isDefaultCodingStt && MALAYALAM_ROMAN_CUE_REGEX.test(phrase)
+              ? 'ml'
+              : !isDefaultCodingStt && HINDI_ROMAN_CUE_REGEX.test(phrase)
+                ? 'hi'
+                : null;
 
-      const promise = authenticatedFetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hint: phrase, lang: apiLang, model: sttModel })
-      })
-        .then(res => (res.ok ? res.json() : null))
-        .then(data => {
-          const converted = cleanSpeechTranscript(data?.text);
-          if (converted && committedSegmentsRef.current[segIndex] !== undefined) {
-            committedSegmentsRef.current[segIndex] = converted;
-            syncDraftFromSpeechState();
+      if (!targetIndicLang) {
+        return Promise.resolve();
+      }
+
+      const promise = transliterateClientFast(phrase, targetIndicLang)
+        .then(clientConverted => {
+          if (clientConverted && clientConverted !== phrase) {
+            if (committedSegmentsRef.current[segIndex] !== undefined) {
+              committedSegmentsRef.current[segIndex] = clientConverted;
+              syncDraftFromSpeechState();
+            }
+            return;
           }
+          return authenticatedFetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              hint: phrase,
+              lang: targetIndicLang,
+              model: sttModel
+            })
+          })
+            .then(res => (res.ok ? res.json() : null))
+            .then(data => {
+              const converted = cleanSpeechTranscript(data?.text);
+              if (converted && committedSegmentsRef.current[segIndex] !== undefined) {
+                committedSegmentsRef.current[segIndex] = converted;
+                syncDraftFromSpeechState();
+              }
+            });
         })
         .catch(() => {});
 
@@ -500,7 +618,7 @@ export default function PromptBar({
             .then(res => (res.ok ? res.json() : null))
             .then(data => {
               const transcribed = cleanSpeechTranscript(data?.text);
-              if (transcribed && (isOpenAiAudioStt || committedSegmentsRef.current.length === 0)) {
+              if (transcribed && committedSegmentsRef.current.length === 0) {
                 committedSegmentsRef.current = [transcribed];
                 currentInterimDisplayRef.current = '';
                 syncDraftFromSpeechState();
@@ -529,6 +647,7 @@ export default function PromptBar({
   );
 
   const startMediaRecorder = useCallback(async () => {
+    if (mediaRecorderRef.current) return true;
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices?.getUserMedia ||
@@ -538,6 +657,10 @@ export default function PromptBar({
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!shouldKeepListeningRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        return false;
+      }
       mediaStreamRef.current = stream;
       audioChunksRef.current = [];
       const recorder = new MediaRecorder(stream);
@@ -557,10 +680,13 @@ export default function PromptBar({
   const stopRecognition = useCallback(
     (flushInterim = false) => {
       shouldKeepListeningRef.current = false;
+      clearSilenceTimer();
       dictation.current += 1;
       if (recognitionRef.current) {
         try {
           recognitionRef.current.onend = null;
+          recognitionRef.current.onerror = null;
+          recognitionRef.current.onresult = null;
           recognitionRef.current.stop();
         } catch {}
         recognitionRef.current = null;
@@ -578,8 +704,10 @@ export default function PromptBar({
       void stopMediaRecorder(flushInterim);
       setListening(false);
     },
-    [convertAndCommitPhrase, isDefaultCodingStt, speechLang, stopMediaRecorder]
+    [clearSilenceTimer, convertAndCommitPhrase, isDefaultCodingStt, speechLang, stopMediaRecorder]
   );
+
+  stopRecognitionRef.current = stopRecognition;
 
   useLayoutEffect(() => {
     const glow = glowRef.current;
@@ -605,13 +733,13 @@ export default function PromptBar({
   }, [open]);
 
   useEffect(() => {
-    if (!plusOpen && !modelOpen && !effortOpen) return undefined;
+    if (!plusOpen && !modelOpen && !effortOpen && !folderMenuOpen) return undefined;
     const onDown = e => {
       if (!rootRef.current?.contains(e.target)) closeMenus();
     };
     document.addEventListener('pointerdown', onDown);
     return () => document.removeEventListener('pointerdown', onDown);
-  }, [plusOpen, modelOpen, effortOpen, closeMenus]);
+  }, [plusOpen, modelOpen, effortOpen, folderMenuOpen, closeMenus]);
 
   useLayoutEffect(() => {
     const el = inputRef.current;
@@ -624,9 +752,9 @@ export default function PromptBar({
 
   useEffect(
     () => () => {
-      stopRecognition(false);
+      stopRecognitionRef.current(false);
     },
-    [stopRecognition]
+    []
   );
 
   useEffect(() => {
@@ -757,6 +885,57 @@ export default function PromptBar({
   const stepAt = i => `calc(${EDGE}px + (100% - ${EDGE * 2}px) * ${i / Math.max(1, efforts.length - 1)})`;
   const fillAt = i => (i === efforts.length - 1 ? '100%' : `calc(${stepAt(i)} + 7px)`);
 
+  const handleShareScreen = async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false
+      });
+      const track = stream.getVideoTracks()[0];
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      await video.play();
+
+      const canvas = document.createElement('canvas');
+      const maxDim = 1280;
+      let w = video.videoWidth || 1280;
+      let h = video.videoHeight || 720;
+      if (w > maxDim || h > maxDim) {
+        if (w >= h) {
+          h = Math.round((h * maxDim) / w);
+          w = maxDim;
+        } else {
+          w = Math.round((w * maxDim) / h);
+          h = maxDim;
+        }
+      }
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        setAttachments(prev => [
+          ...prev,
+          {
+            name: `Screen-${new Date().toLocaleTimeString()}.jpg`,
+            type: 'image/jpeg',
+            dataUrl
+          }
+        ]);
+      }
+      if (track) track.stop();
+      stream.getTracks().forEach(t => t.stop());
+      focusInput();
+    } catch {
+      // User cancelled screen picker
+    }
+  };
+
   const pick = row => {
     if (open === 'model') {
       setModelKey(row.key);
@@ -765,6 +944,13 @@ export default function PromptBar({
       return;
     }
     const head = token ? draft.slice(0, token.start) : draft;
+    if (row.shareScreen) {
+      setDraft(head);
+      setPlusOpen(false);
+      setDismissed(false);
+      void handleShareScreen();
+      return;
+    }
     if (row.attach) {
       setDraft(head);
       Promise.resolve(latest.current.onAttach?.()).then(files => {
@@ -808,7 +994,8 @@ export default function PromptBar({
     latest.current.onSend?.(finalToSend || collapseRepeatedSpeech(draft), {
       attachments,
       model,
-      effort: level
+      effort: level,
+      agentMode
     });
     setDraft('');
     setAttachments([]);
@@ -825,8 +1012,11 @@ export default function PromptBar({
       if (recognitionRef.current) {
         try {
           recognitionRef.current.onend = null;
+          recognitionRef.current.onerror = null;
+          recognitionRef.current.onresult = null;
           recognitionRef.current.stop();
         } catch {}
+        recognitionRef.current = null;
       }
 
       processedResultIndicesRef.current = new Set();
@@ -860,6 +1050,11 @@ export default function PromptBar({
         const cleanedInterim = cleanSpeechTranscript(interim);
         latestRawInterimRef.current = cleanedInterim;
 
+        if (newlyFinalSegments.length > 0 || cleanedInterim.length > 0) {
+          hasSpokenWordInSessionRef.current = true;
+          scheduleSilenceAutoStop(true);
+        }
+
         if (newlyFinalSegments.length > 0) {
           latestRawInterimRef.current = '';
           currentInterimDisplayRef.current = '';
@@ -871,30 +1066,22 @@ export default function PromptBar({
           currentInterimDisplayRef.current = cleanedInterim;
           syncDraftFromSpeechState();
 
-          const shouldTransliterateInterim =
-            (isDefaultCodingStt && (effectiveBcp47 === 'ml-IN' || effectiveBcp47 === 'hi-IN')) ||
-            (!isDefaultCodingStt &&
-              (MALAYALAM_ROMAN_CUE_REGEX.test(cleanedInterim) ||
-                HINDI_ROMAN_CUE_REGEX.test(cleanedInterim)));
+          const targetInterimLang =
+            isDefaultCodingStt && effectiveBcp47 === 'ml-IN'
+              ? 'ml'
+              : isDefaultCodingStt && effectiveBcp47 === 'hi-IN'
+                ? 'hi'
+                : !isDefaultCodingStt && MALAYALAM_ROMAN_CUE_REGEX.test(cleanedInterim)
+                  ? 'ml'
+                  : !isDefaultCodingStt && HINDI_ROMAN_CUE_REGEX.test(cleanedInterim)
+                    ? 'hi'
+                    : null;
 
-          if (shouldTransliterateInterim && !/[\u0D00-\u0D7F\u0900-\u097F]/.test(cleanedInterim)) {
+          if (targetInterimLang && !/[\u0D00-\u0D7F\u0900-\u097F]/.test(cleanedInterim)) {
             const seq = ++interimConvertSeqRef.current;
-            const apiLang = !isDefaultCodingStt
-              ? 'auto'
-              : effectiveBcp47 === 'ml-IN'
-                ? 'ml'
-                : effectiveBcp47 === 'hi-IN'
-                  ? 'hi'
-                  : 'en';
-            void authenticatedFetch('/api/transcribe', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ hint: cleanedInterim, lang: apiLang, model: sttModel })
-            })
-              .then(r => (r.ok ? r.json() : null))
-              .then(data => {
+            void transliterateClientFast(cleanedInterim, targetInterimLang)
+              .then(converted => {
                 if (seq !== interimConvertSeqRef.current || !latestRawInterimRef.current) return;
-                const converted = cleanSpeechTranscript(data?.text);
                 if (converted) {
                   currentInterimDisplayRef.current = converted;
                   syncDraftFromSpeechState();
@@ -914,27 +1101,32 @@ export default function PromptBar({
       recognition.onerror = event => {
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           shouldKeepListeningRef.current = false;
+          clearSilenceTimer();
           setListening(false);
         }
       };
 
       recognition.onend = () => {
-        // Flush any uncommitted interim speech before restarting so words never vanish
         if (latestRawInterimRef.current.trim()) {
           const pendingText = latestRawInterimRef.current;
           latestRawInterimRef.current = '';
           currentInterimDisplayRef.current = '';
+          hasSpokenWordInSessionRef.current = true;
+          scheduleSilenceAutoStop(true);
           void convertAndCommitPhrase(pendingText, effectiveBcp47);
         }
+
         if (shouldKeepListeningRef.current) {
           processedResultIndicesRef.current = new Set();
           try {
             recognition.start();
           } catch {
             shouldKeepListeningRef.current = false;
+            clearSilenceTimer();
             setListening(false);
           }
         } else {
+          clearSilenceTimer();
           setListening(false);
         }
       };
@@ -948,7 +1140,7 @@ export default function PromptBar({
         return false;
       }
     },
-    [convertAndCommitPhrase, isDefaultCodingStt, sttModel, syncDraftFromSpeechState]
+    [clearSilenceTimer, convertAndCommitPhrase, isDefaultCodingStt, scheduleSilenceAutoStop, syncDraftFromSpeechState]
   );
 
   const toggleListen = () => {
@@ -958,6 +1150,9 @@ export default function PromptBar({
       return;
     }
 
+    const SpeechRecognition =
+      typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
+
     baseDraftRef.current = draft.trimEnd();
     committedSegmentsRef.current = [];
     currentInterimDisplayRef.current = '';
@@ -965,31 +1160,28 @@ export default function PromptBar({
     lastCommittedRawRef.current = '';
     lastCommittedTimeRef.current = 0;
     pendingConversionsRef.current = [];
+    hasSpokenWordInSessionRef.current = false;
+    shouldKeepListeningRef.current = true;
+    setListening(true);
 
-    const SpeechRecognition =
-      typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
-
-    // If an OpenAI audio transcription model is explicitly selected, start MediaRecorder alongside
-    // browser recognition so audio is captured and sent to /api/transcribe when finished.
-    if (isOpenAiAudioStt) {
-      void startMediaRecorder();
-    }
+    // Start 6-second initial silence timeout (switches to 20s once at least one word is spoken)
+    scheduleSilenceAutoStop(false);
 
     if (SpeechRecognition) {
-      shouldKeepListeningRef.current = true;
-      setListening(true);
       const started = startBrowserRecognition(speechLang);
-      if (started) {
-        focusInput();
-        return;
+      if (!started) {
+        shouldKeepListeningRef.current = false;
+        clearSilenceTimer();
+        setListening(false);
       }
-      shouldKeepListeningRef.current = false;
+      focusInput();
+      return;
     }
 
-    // Fallback when SpeechRecognition is unavailable: record audio and transcribe via VoidAI/OmniRoute STT
-    setListening(true);
     void startMediaRecorder().then(started => {
       if (!started) {
+        shouldKeepListeningRef.current = false;
+        clearSilenceTimer();
         const seq = ++dictation.current;
         Promise.resolve(latest.current.onDictate?.()).then(
           text => {
@@ -1054,7 +1246,7 @@ export default function PromptBar({
       }
     }
     if (e.key === 'Escape') {
-      if (open) {
+      if (open || folderMenuOpen) {
         e.preventDefault();
         setDismissed(true);
         closeMenus();
@@ -1089,6 +1281,65 @@ export default function PromptBar({
         '--pb-press': pressScale
       }}
     >
+      {folderMenuOpen ? (
+        <div
+          className="prompt-bar__menu"
+          role="dialog"
+          aria-label="Connected folders"
+          style={{ left: '36px', right: 'auto', width: '240px' }}
+        >
+          <div className="px-2.5 py-1.5 text-[11px] font-medium text-[#8e8e95]">
+            Connected folders
+          </div>
+          {connectedFolders.length > 0 ? (
+            connectedFolders.map(folderName => (
+              <div
+                key={folderName}
+                className="flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[12.5px] text-[#e4e4e7]"
+              >
+                <span className="flex min-w-0 flex-1 items-center gap-2 truncate">
+                  <svg
+                    className="h-3.5 w-3.5 shrink-0 text-[#a1a1aa]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.9"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="truncate">{folderName}</span>
+                </span>
+                <button
+                  type="button"
+                  title={`Disconnect ${folderName}`}
+                  onClick={() => latest.current.onDisconnectFolder?.(folderName)}
+                  className="ml-2 rounded p-1 text-[#8e8e95] transition-colors hover:bg-white/[0.08] hover:text-white"
+                >
+                  <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2.2} />
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="px-2.5 py-2 text-[12px] text-[#8e8e95]">
+              No folder connected
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setFolderMenuOpen(false);
+              latest.current.onConnectFolder?.();
+            }}
+            className="mt-1 flex w-full items-center gap-2 rounded-lg border-t border-white/[0.06] px-2.5 py-2 text-left text-[12.5px] font-medium text-[#d4d4d8] transition-colors hover:bg-white/[0.06] hover:text-white"
+          >
+            <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
+            <span>Connect folder…</span>
+          </button>
+        </div>
+      ) : null}
+
       {open ? (
         <div
           className="prompt-bar__menu"
@@ -1097,6 +1348,7 @@ export default function PromptBar({
             open === 'at' ? 'Sources' : open === 'slash' ? 'Commands' : open === 'model' ? 'Models' : 'Effort'
           }
           data-kind={open}
+          data-align={open === 'model' && agentMode ? 'right' : undefined}
         >
           {open === 'effort' ? (
             <>
@@ -1241,7 +1493,13 @@ export default function PromptBar({
           className="prompt-bar__input"
           rows={1}
           value={draft}
-          placeholder={listening ? 'Speak in your language' : placeholder}
+          placeholder={
+            listening
+              ? 'Speak in your language'
+              : agentMode
+                ? 'Describe a task'
+                : placeholder
+          }
           aria-label="Prompt"
           onPaste={handlePaste}
           onChange={e => {
@@ -1263,6 +1521,7 @@ export default function PromptBar({
         />
 
         <div className="prompt-bar__bar">
+          {/* + Button */}
           <button
             type="button"
             className="prompt-bar__tool"
@@ -1273,6 +1532,7 @@ export default function PromptBar({
             onClick={() => {
               setModelOpen(false);
               setEffortOpen(false);
+              setFolderMenuOpen(false);
               setActive(0);
               setPlusOpen(v => !v);
               focusInput();
@@ -1280,7 +1540,9 @@ export default function PromptBar({
           >
             <HugeiconsIcon icon={PlusSignIcon} size={16} strokeWidth={2} />
           </button>
-          {models.length > 0 ? (
+
+          {/* In Normal Chat Mode: Model (VOID) and Effort (High) sit right next to the + button on the LEFT */}
+          {!agentMode && models.length > 0 ? (
             <button
               type="button"
               className="prompt-bar__pick"
@@ -1291,6 +1553,7 @@ export default function PromptBar({
               onClick={() => {
                 setPlusOpen(false);
                 setEffortOpen(false);
+                setFolderMenuOpen(false);
                 setActive(Math.max(0, models.indexOf(model)));
                 setModelOpen(v => !v);
                 focusInput();
@@ -1300,7 +1563,8 @@ export default function PromptBar({
               <HugeiconsIcon icon={ArrowDown01Icon} size={12} strokeWidth={2.4} />
             </button>
           ) : null}
-          {efforts.length > 0 ? (
+
+          {!agentMode && efforts.length > 0 ? (
             <button
               type="button"
               className="prompt-bar__pick"
@@ -1312,6 +1576,7 @@ export default function PromptBar({
               onClick={() => {
                 setPlusOpen(false);
                 setModelOpen(false);
+                setFolderMenuOpen(false);
                 setEffortOpen(v => !v);
                 focusInput();
               }}
@@ -1320,7 +1585,71 @@ export default function PromptBar({
               <span>{level}</span>
             </button>
           ) : null}
+
+          {/* In Agent Mode: Show Folders dropdown button next to + on the LEFT */}
+          {agentMode ? (
+            <button
+              type="button"
+              className="prompt-bar__pick"
+              aria-label="Connect folders"
+              aria-expanded={folderMenuOpen}
+              data-on={folderMenuOpen ? '' : undefined}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                setPlusOpen(false);
+                setModelOpen(false);
+                setEffortOpen(false);
+                setFolderMenuOpen(v => !v);
+                focusInput();
+              }}
+            >
+              <svg
+                className="h-3.5 w-3.5 text-[#c4c4c9]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <span>
+                {connectedFolders.length === 1
+                  ? connectedFolders[0]
+                  : connectedFolders.length > 1
+                    ? `${connectedFolders.length} Folders`
+                    : 'Folders'}
+              </span>
+              <HugeiconsIcon icon={ArrowDown01Icon} size={11} strokeWidth={2.4} />
+            </button>
+          ) : null}
+
           <span className="prompt-bar__spacer" />
+
+          {/* In Agent Mode ONLY: Model selector (VOID) sits on the RIGHT, and its dropdown aligns directly above it on the right */}
+          {agentMode && models.length > 0 ? (
+            <button
+              type="button"
+              className="prompt-bar__pick"
+              aria-label="Choose model"
+              aria-expanded={modelOpen}
+              data-on={modelOpen ? '' : undefined}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                setPlusOpen(false);
+                setEffortOpen(false);
+                setFolderMenuOpen(false);
+                setActive(Math.max(0, models.indexOf(model)));
+                setModelOpen(v => !v);
+                focusInput();
+              }}
+            >
+              <span>{model.shortName ?? model.name}</span>
+              <HugeiconsIcon icon={ArrowDown01Icon} size={11} strokeWidth={2.4} />
+            </button>
+          ) : null}
+
           {onDictate ? (
             <>
               {isDefaultCodingStt ? (

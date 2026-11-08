@@ -1,9 +1,13 @@
 import {
+  type AgentPlanStep,
   OPENAI_TTS_VOICE_SPECS,
+  type PendingTerminalCommand,
   type TranscriptionModelId,
   type VoidAiEmbeddingModel,
   type VoidAiTtsModel,
 } from './tools/index';
+
+export type { AgentPlanStep, PendingTerminalCommand };
 
 export interface ChatAttachment {
   name: string;
@@ -18,6 +22,10 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   attachments?: ChatAttachmentItem[];
+  agentMode?: boolean;
+  agentSteps?: AgentPlanStep[];
+  agentTaskTitle?: string;
+  pendingCommand?: PendingTerminalCommand;
   createdAt?: number;
 }
 
@@ -29,6 +37,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   modelKey?: string;
+  agentMode?: boolean;
 }
 
 export interface UserSettings {
@@ -165,7 +174,7 @@ export const AVAILABLE_TTS_VOICES: VoiceOption[] = [
 const CHATS_STORAGE_KEY = 'void_ai_chat_sessions_v1';
 const userChatsStorageKey = (userId: string) =>
   `${CHATS_STORAGE_KEY}:user:${userId}`;
-const SETTINGS_STORAGE_KEY = 'void_ai_user_settings_v1';
+const SETTINGS_STORAGE_KEY = 'void_ai_user_settings_v2';
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   ttsVoice: 'coral',

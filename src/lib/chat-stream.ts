@@ -1,12 +1,18 @@
 import {
+  type TerminalToolContinuation,
   hasNixUnlockKey,
   isModelIdentityQuery,
   normalizeVoidIdentity,
 } from './omniroute-agent';
 import { authenticatedFetch } from './api-fetch';
-import type { VoidAiEmbeddingModel } from './tools/config';
+import type {
+  AgentPlanStep,
+  PendingTerminalCommand,
+  VoidAiEmbeddingModel,
+} from './tools/index';
 
 export { normalizeVoidIdentity };
+export type { TerminalToolContinuation };
 
 export interface StreamChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -18,22 +24,32 @@ export interface StreamChatOptions {
   messages: StreamChatMessage[];
   model?: string;
   effort?: string;
+  agentMode?: boolean;
+  connectedFolders?: string[];
+  terminalToolResult?: TerminalToolContinuation;
   embeddingModel?: VoidAiEmbeddingModel;
   moderationEnabled?: boolean;
   imageUrls?: string[];
   signal?: AbortSignal;
   onChunk: (deltaText: string, fullText: string) => void;
+  onAgentSteps?: (steps: AgentPlanStep[], taskTitle?: string) => void;
+  onPendingCommand?: (pendingCommand: PendingTerminalCommand) => void;
 }
 
 export async function streamChatCompletion({
   messages,
   model = 'void-combo',
   effort = 'High',
+  agentMode = false,
+  connectedFolders,
+  terminalToolResult,
   embeddingModel = 'text-embedding-3-large',
   moderationEnabled = true,
   imageUrls,
   signal,
   onChunk,
+  onAgentSteps,
+  onPendingCommand,
 }: StreamChatOptions): Promise<string> {
   const normalizedModel = model.trim().toLowerCase();
 
@@ -67,6 +83,9 @@ export async function streamChatCompletion({
       messages,
       model: model || 'void-combo',
       effort: effort || 'High',
+      agentMode,
+      connectedFolders,
+      terminalToolResult,
       embeddingModel,
       moderationEnabled,
       imageUrls,
@@ -118,6 +137,27 @@ export async function streamChatCompletion({
     onChunk(delta, normalizedFullText);
   };
 
+  const handleParsedFrame = (parsed: Record<string, unknown>): boolean => {
+    if (Array.isArray(parsed?.agentSteps)) {
+      const taskTitle =
+        typeof parsed.agentTaskTitle === 'string'
+          ? parsed.agentTaskTitle
+          : undefined;
+      onAgentSteps?.(parsed.agentSteps as AgentPlanStep[], taskTitle);
+      return true;
+    }
+
+    if (
+      parsed?.pendingCommand &&
+      typeof parsed.pendingCommand === 'object'
+    ) {
+      onPendingCommand?.(parsed.pendingCommand as PendingTerminalCommand);
+      return true;
+    }
+
+    return false;
+  };
+
   const processLine = (rawLine: string) => {
     const line = rawLine.trim();
     if (!line || line.startsWith(':')) return;
@@ -127,11 +167,20 @@ export async function streamChatCompletion({
       if (dataStr === '[DONE]') return;
 
       try {
-        const parsed = JSON.parse(dataStr);
-        const delta: string | undefined =
-          parsed?.choices?.[0]?.delta?.content ??
-          parsed?.choices?.[0]?.message?.content ??
-          parsed?.content;
+        const parsed = JSON.parse(dataStr) as Record<string, unknown>;
+        if (handleParsedFrame(parsed)) return;
+
+        const choices = Array.isArray(parsed?.choices) ? parsed.choices : [];
+        const firstChoice = choices[0] as Record<string, unknown> | undefined;
+        const deltaObj = firstChoice?.delta as
+          | Record<string, unknown>
+          | undefined;
+        const msgObj = firstChoice?.message as
+          | Record<string, unknown>
+          | undefined;
+
+        const delta: unknown =
+          deltaObj?.content ?? msgObj?.content ?? parsed?.content;
         if (typeof delta === 'string' && delta.length > 0) {
           emitDelta(delta);
         }
@@ -142,11 +191,20 @@ export async function streamChatCompletion({
     }
 
     try {
-      const parsed = JSON.parse(line);
-      const content: string | undefined =
-        parsed?.choices?.[0]?.message?.content ??
-        parsed?.choices?.[0]?.delta?.content ??
-        parsed?.content;
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (handleParsedFrame(parsed)) return;
+
+      const choices = Array.isArray(parsed?.choices) ? parsed.choices : [];
+      const firstChoice = choices[0] as Record<string, unknown> | undefined;
+      const deltaObj = firstChoice?.delta as
+        | Record<string, unknown>
+        | undefined;
+      const msgObj = firstChoice?.message as
+        | Record<string, unknown>
+        | undefined;
+
+      const content: unknown =
+        msgObj?.content ?? deltaObj?.content ?? parsed?.content;
       if (typeof content === 'string' && content.length > 0) {
         emitDelta(content);
       }

@@ -21,8 +21,11 @@ import { listAllStoredMemories } from '../lib/memory-storage';
 interface SettingsModalProps {
   open: boolean;
   settings: UserSettings;
+  canLogOut?: boolean;
+  accountLabel?: string;
   onUpdateSettings: (next: UserSettings) => void;
   onClearAllChats: () => void;
+  onLogOut?: () => void;
   onClose: () => void;
 }
 
@@ -146,8 +149,11 @@ function ChevronRight({ rotated = false }: { rotated?: boolean }) {
 export default function SettingsModal({
   open,
   settings,
+  canLogOut = true,
+  accountLabel,
   onUpdateSettings,
   onClearAllChats,
+  onLogOut,
   onClose,
 }: SettingsModalProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('voice');
@@ -159,6 +165,7 @@ export default function SettingsModal({
   const [query, setQuery] = useState('');
   const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmLogout, setConfirmLogout] = useState(false);
 
   // Live connection status for AI Models tab (Memory & Embeddings + Moderation)
   const [embeddingStatus, setEmbeddingStatus] = useState<
@@ -176,6 +183,7 @@ export default function SettingsModal({
   useEffect(() => {
     if (!open) {
       setConfirmClear(false);
+      setConfirmLogout(false);
       setQuery('');
       setVoiceView(null);
       setModelsOpenBox(null);
@@ -1378,6 +1386,50 @@ export default function SettingsModal({
                   </button>
                 )}
               </div>
+
+              {canLogOut && onLogOut ? (
+                <div className="flex items-center justify-between gap-4 border-t border-white/[0.07] pt-4">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-[#ededed]">
+                      Log out
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-[#8a8a8f]">
+                      {accountLabel
+                        ? `Sign out of ${accountLabel} on this browser`
+                        : 'Sign out of your current account or guest session'}
+                    </div>
+                  </div>
+                  {confirmLogout ? (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmLogout(false)}
+                        className="rounded-md bg-white/[0.06] px-2.5 py-1.5 text-[11.5px] font-medium text-[#c9c9cf] transition-colors hover:bg-white/[0.1] hover:text-white"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmLogout(false);
+                          onLogOut();
+                        }}
+                        className="rounded-md bg-red-500/15 px-2.5 py-1.5 text-[11.5px] font-medium text-red-300 transition-colors hover:bg-red-500/25"
+                      >
+                        Log out
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmLogout(true)}
+                      className="shrink-0 rounded-md border border-white/[0.1] px-2.5 py-1.5 text-[11.5px] font-medium text-[#c9c9cf] transition-colors hover:bg-white/[0.06] hover:text-white"
+                    >
+                      Log out
+                    </button>
+                  )}
+                </div>
+              ) : null}
             </div>
           )}
         </div>

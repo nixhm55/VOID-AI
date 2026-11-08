@@ -1,5 +1,7 @@
 import {
   OPENROUTER_API_KEY,
+  type TerminalToolContinuation,
+  type WorkspaceContextInput,
   formatSseDataFrame,
   resolveOmniApiKeys,
   resolveOmniBaseUrl,
@@ -9,8 +11,10 @@ import {
   type VoidAiEmbeddingModel,
   buildModerationPayloadInput,
   createEmbeddingsViaVoidAi,
+  isAgentModeTrigger,
   moderateContentViaVoidAi,
 } from '../src/lib/tools/index.js';
+import { inspectConnectedWorkspace } from '../src/lib/tools/terminal_executor.js';
 import {
   authenticateApiRequest,
   authenticationErrorResponse,
@@ -23,6 +27,9 @@ interface ChatRequestBody {
   messages?: Array<{ role?: string; content?: string; imageUrls?: string[] }>;
   model?: string;
   effort?: string;
+  agentMode?: boolean;
+  connectedFolders?: string[];
+  terminalToolResult?: TerminalToolContinuation;
   embeddingModel?: VoidAiEmbeddingModel;
   moderationEnabled?: boolean;
   imageUrls?: string[];
@@ -100,10 +107,31 @@ async function post(req: Request): Promise<Response> {
       });
     }
 
+    const connectedFolders = Array.isArray(body.connectedFolders)
+      ? body.connectedFolders
+      : [];
+    const isAgent = isAgentModeTrigger(userText, Boolean(body.agentMode));
+
+    let workspaceSummary: WorkspaceContextInput | undefined;
+    if (isAgent) {
+      try {
+        workspaceSummary = inspectConnectedWorkspace(
+          connectedFolders,
+          userText,
+        );
+      } catch {
+        workspaceSummary = undefined;
+      }
+    }
+
     const result = await runOmniRouteAgentStream({
       rawMessages,
       requestedModel: body.model,
       effort: body.effort,
+      agentMode: Boolean(body.agentMode),
+      connectedFolders,
+      workspaceSummary,
+      terminalToolResult: body.terminalToolResult,
       imageUrls: attachedImages,
       signal: req.signal,
       baseUrl: resolveOmniBaseUrl(),

@@ -23,21 +23,30 @@
   right: 0;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 2;
+  z-index: 20;
   padding: 4px;
   border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--pb-menu);
   box-shadow:
-    0 10px 30px -10px rgba(0, 0, 0, 0.35),
-    0 1px 2px rgba(0, 0, 0, 0.08);
+    0 12px 32px -10px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.12);
   transform-origin: bottom center;
   animation: prompt-bar-pop 180ms var(--pb-ease-out) both;
 }
 
 .prompt-bar__menu[data-kind='model'] {
   right: auto;
-  width: 200px;
+  left: 36px;
+  width: 196px;
   transform-origin: bottom left;
+}
+
+.prompt-bar__menu[data-kind='model'][data-align='right'] {
+  left: auto;
+  right: 36px;
+  width: 196px;
+  transform-origin: bottom right;
 }
 
 @keyframes prompt-bar-pop {
@@ -138,11 +147,16 @@
   isolation: isolate;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: 10px;
+  padding: 14px 16px 12px;
   border-radius: var(--pb-radius);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--pb-bg);
+  box-shadow:
+    0 18px 45px -15px rgba(0, 0, 0, 0.65),
+    0 1px 0 rgba(255, 255, 255, 0.04) inset;
   cursor: text;
+  transition: background-color 450ms ease, border-color 450ms ease, box-shadow 450ms ease;
 }
 
 .prompt-bar__field::before {
@@ -396,6 +410,7 @@
 
 .prompt-bar__menu[data-kind='effort'] {
   right: auto;
+  left: 96px;
   width: 248px;
   padding: 12px 14px 14px;
   transform-origin: bottom left;

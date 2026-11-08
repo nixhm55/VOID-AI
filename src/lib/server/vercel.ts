@@ -28,14 +28,16 @@ async function toWebRequest(
     }
   };
 
+  // Only abort if the client genuinely aborts the request before upload completes
+  // (`!req.complete`) or if the response socket (`res`) closes before `res.writableEnded`.
   req.once('aborted', abortIfClientDisconnected);
   req.once('close', () => {
-    if (!res.writableEnded) {
+    if (!req.complete && !res.writableEnded) {
       abortIfClientDisconnected();
     }
   });
   res.once('close', () => {
-    if (!res.writableEnded) {
+    if (!res.writableEnded && !res.writableFinished) {
       abortIfClientDisconnected();
     }
   });
@@ -50,8 +52,6 @@ async function toWebRequest(
       } else {
         body = JSON.stringify(req.body);
       }
-      // Remove original content-length / transfer-encoding so Fetch Request
-      // computes the exact byte length of the serialized body on Vercel.
       headers.delete('content-length');
       headers.delete('transfer-encoding');
     } else {

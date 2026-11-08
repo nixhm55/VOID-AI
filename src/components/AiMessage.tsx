@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { splitTextIntoSpeechChunks } from '../lib/tools/text_to_speech';
+import type {
+  AgentPlanStep,
+  PendingTerminalCommand,
+} from '../lib/tools/index';
 import { authenticatedFetch } from '../lib/api-fetch';
+import TerminalApprovalCard from './TerminalApprovalCard';
 
 interface AiMessageProps {
   text: string;
@@ -10,6 +15,13 @@ interface AiMessageProps {
   ttsSpeed?: number;
   autoRead?: boolean;
   shouldAutoRead?: boolean;
+  agentSteps?: AgentPlanStep[];
+  agentTaskTitle?: string;
+  pendingCommand?: PendingTerminalCommand;
+  onTerminalDecision?: (
+    action: 'allow' | 'deny' | 'skip',
+    finalCommand: string,
+  ) => void;
 }
 
 interface CodeBlockProps {
@@ -18,6 +30,170 @@ interface CodeBlockProps {
 }
 
 let activeStopSpeechCallback: (() => void) | null = null;
+
+/**
+ * Gemini-style clean, borderless step-by-step Agent Execution Timeline.
+ * - All completion checkmarks (ticks) are crisp white (`text-white`) as requested.
+ * - Dynamic task action title + "Completed X steps" + minimize/expand chevron.
+ */
+function AgentExecutionTimeline({
+  steps,
+  taskTitle,
+  isStreaming,
+  isWaitingApproval,
+}: {
+  steps: AgentPlanStep[];
+  taskTitle?: string;
+  isStreaming: boolean;
+  isWaitingApproval: boolean;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const completedCount = steps.filter((s) => s.status === 'completed').length;
+  const allCompleted =
+    steps.length > 0 &&
+    completedCount === steps.length &&
+    !isStreaming &&
+    !isWaitingApproval;
+
+  const resolvedTitle =
+    !allCompleted
+      ? 'Thinking it through'
+      : taskTitle || steps[0]?.taskTitle || 'Thinking it through';
+
+  const completedLabel =
+    completedCount > 0
+      ? `Completed ${completedCount} ${completedCount === 1 ? 'step' : 'steps'}`
+      : 'Thinking…';
+
+  return (
+    <div className="mb-3.5 w-full max-w-[640px] select-none">
+      {/* Clean Gemini-style inline collapsible header — No checkmark on top header, only on inner steps! */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="group/header inline-flex max-w-full items-center gap-2 rounded-full py-1.5 pr-3 pl-1 text-left transition-colors hover:bg-white/[0.04]"
+      >
+        {/* Status Indicator Icon (Only shown while actively running or waiting approval; no tick when finished) */}
+        {allCompleted ? null : isWaitingApproval ? (
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-400/15 text-amber-300">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+          </span>
+        ) : (
+          <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+            <span className="absolute h-3.5 w-3.5 animate-spin rounded-full border-[1.7px] border-white/80 border-t-transparent" />
+            <span className="h-1.5 w-1.5 rounded-full bg-white" />
+          </span>
+        )}
+
+        {/* Dynamic Task Action Title ("Thinking it through" / clean action summary) */}
+        <span
+          className={`truncate text-[13.5px] font-medium tracking-[-0.01em] ${
+            allCompleted
+              ? 'text-[#e4e4e7]'
+              : 'agent-shimmer-text text-white'
+          }`}
+        >
+          {resolvedTitle}
+        </span>
+
+        {/* Completed X steps counter */}
+        <span className="shrink-0 text-[12.5px] text-[#8e8ea0]">
+          {completedLabel}
+        </span>
+
+        {/* Small minimize / expand chevron button */}
+        <span className="ml-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[#8e8ea0] transition-colors group-hover/header:bg-white/[0.06] group-hover/header:text-white">
+          <svg
+            className={`h-3.5 w-3.5 transition-transform duration-200 ease-out ${
+              expanded ? 'rotate-180' : ''
+            }`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </span>
+      </button>
+
+      {/* Unboxed Step-by-Step Vertical Timeline ("padi padi aayi Gemini ne pole") */}
+      <div
+        className={`grid transition-all duration-250 ease-out ${
+          expanded
+            ? 'mt-1.5 grid-rows-[1fr] opacity-100'
+            : 'grid-rows-[0fr] opacity-0'
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="relative ml-3.5 space-y-2.5 border-l border-white/[0.12] pl-4 pt-1 pb-1">
+            {steps.map((step, index) => {
+              const isDone = step.status === 'completed';
+              const isRunning = step.status === 'running';
+              const isWaiting = step.status === 'waiting_approval';
+              const isFailed = step.status === 'failed';
+
+              return (
+                <div
+                  key={step.id}
+                  style={{ animationDelay: `${index * 45}ms` }}
+                  className="agent-step-item relative flex items-start gap-2.5 text-[13px]"
+                >
+                  {/* Step Timeline Node (White Checkmark for completed steps) */}
+                  <span className="mt-[3px] flex h-4 w-4 shrink-0 items-center justify-center">
+                    {isDone ? (
+                      <svg
+                        className="h-3.5 w-3.5 text-white"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    ) : isWaiting ? (
+                      <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                    ) : isRunning ? (
+                      <span className="h-3 w-3 animate-spin rounded-full border-[1.8px] border-white border-t-transparent" />
+                    ) : isFailed ? (
+                      <span className="h-2 w-2 rounded-full bg-rose-400" />
+                    ) : (
+                      <span className="h-1.5 w-1.5 rounded-full bg-white/25" />
+                    )}
+                  </span>
+
+                  <div className="min-w-0 flex-1">
+                    <div
+                      className={`leading-snug transition-colors ${
+                        isDone
+                          ? 'text-[#e4e4e7]'
+                          : isRunning || isWaiting
+                            ? 'font-medium text-white'
+                            : 'text-[#7c7c88]'
+                      }`}
+                    >
+                      {step.title}
+                    </div>
+                    {step.detail ? (
+                      <p className="mt-0.5 truncate text-[11.5px] text-[#8a8a96]">
+                        {step.detail}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function CodeBlock({ language, code }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
@@ -46,7 +222,7 @@ function CodeBlock({ language, code }: CodeBlockProps) {
           {copied ? (
             <>
               <svg
-                className="h-3.5 w-3.5 text-emerald-400"
+                className="h-3.5 w-3.5 text-white"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -56,7 +232,7 @@ function CodeBlock({ language, code }: CodeBlockProps) {
               >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              <span className="text-emerald-400">Copied</span>
+              <span className="text-white">Copied</span>
             </>
           ) : (
             <>
@@ -120,7 +296,43 @@ function GeneratedImageCard({ alt, src }: { alt: string; src: string }) {
   );
 }
 
+/**
+ * Safely parses standalone image lines (`![alt](src)`) using fast string indexing
+ * instead of regex so multi-megabyte base64 data URLs never cause browser freezes or crashes.
+ */
+function parseStandaloneImageLine(
+  trimmedLine: string,
+): { alt: string; src: string } | null {
+  if (!trimmedLine.startsWith('![') || !trimmedLine.endsWith(')')) {
+    return null;
+  }
+  const midIdx = trimmedLine.indexOf('](');
+  if (midIdx < 2) return null;
+  const alt = trimmedLine.slice(2, midIdx);
+  const src = trimmedLine.slice(midIdx + 2, -1).trim();
+  if (!src) return null;
+  return { alt, src };
+}
+
 function renderInlineMarkdown(text: string): ReactNode[] {
+  // Fast path if line contains a huge base64 image
+  if (text.length > 4000 && text.includes('![') && text.includes('](')) {
+    const startIdx = text.indexOf('![');
+    const midIdx = text.indexOf('](', startIdx);
+    const endIdx = midIdx > startIdx ? text.indexOf(')', midIdx + 2) : -1;
+    if (startIdx >= 0 && midIdx > startIdx && endIdx > midIdx) {
+      const before = text.slice(0, startIdx);
+      const alt = text.slice(startIdx + 2, midIdx);
+      const src = text.slice(midIdx + 2, endIdx);
+      const after = text.slice(endIdx + 1);
+      return [
+        ...(before ? renderInlineMarkdown(before) : []),
+        <GeneratedImageCard key="fast-inline-img" alt={alt} src={src} />,
+        ...(after ? renderInlineMarkdown(after) : []),
+      ];
+    }
+  }
+
   const tokens: ReactNode[] = [];
   const regex =
     /(!\[[^\]]*\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g;
@@ -135,13 +347,13 @@ function renderInlineMarkdown(text: string): ReactNode[] {
 
     const raw = match[0];
     if (raw.startsWith('![')) {
-      const imgMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
-      if (imgMatch) {
+      const parsedImg = parseStandaloneImageLine(raw);
+      if (parsedImg) {
         tokens.push(
           <GeneratedImageCard
             key={`img-${key++}`}
-            alt={imgMatch[1]}
-            src={imgMatch[2]}
+            alt={parsedImg.alt}
+            src={parsedImg.src}
           />,
         );
       } else {
@@ -211,14 +423,14 @@ function renderTextBlocks(segment: string, blockKeyPrefix: string): ReactNode[] 
       continue;
     }
 
-    // Standalone markdown image line
-    const standaloneImg = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(trimmed);
+    // Standalone markdown image line (crash-safe for huge base64 strings)
+    const standaloneImg = parseStandaloneImageLine(trimmed);
     if (standaloneImg) {
       elements.push(
         <GeneratedImageCard
           key={`${blockKeyPrefix}-img-${i}`}
-          alt={standaloneImg[1]}
-          src={standaloneImg[2]}
+          alt={standaloneImg.alt}
+          src={standaloneImg.src}
         />,
       );
       i += 1;
@@ -273,7 +485,7 @@ function renderTextBlocks(segment: string, blockKeyPrefix: string): ReactNode[] 
       elements.push(
         <blockquote
           key={`${blockKeyPrefix}-quote-${i}`}
-          className="my-3 border-l-2 border-[#b39dff]/60 pl-4 italic text-[#d4d4d8]"
+          className="my-3 border-l-2 border-white/40 pl-4 italic text-[#d4d4d8]"
         >
           {renderInlineMarkdown(quoteLines.join(' '))}
         </blockquote>,
@@ -329,7 +541,7 @@ function renderTextBlocks(segment: string, blockKeyPrefix: string): ReactNode[] 
       lines[i].trim() !== '' &&
       !lines[i].trim().startsWith('#') &&
       !lines[i].trim().startsWith('> ') &&
-      !/^!\[([^\]]*)\]\(([^)]+)\)$/.test(lines[i].trim()) &&
+      !parseStandaloneImageLine(lines[i].trim()) &&
       !/^[-*•]\s+/.test(lines[i].trim()) &&
       !/^\d+\.\s+/.test(lines[i].trim())
     ) {
@@ -363,6 +575,10 @@ export default function AiMessage({
   ttsSpeed = 1.0,
   autoRead = false,
   shouldAutoRead = false,
+  agentSteps,
+  agentTaskTitle,
+  pendingCommand,
+  onTerminalDecision,
 }: AiMessageProps) {
   const [copiedAll, setCopiedAll] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -606,17 +822,42 @@ export default function AiMessage({
     }
   };
 
+  const isWaitingApproval =
+    pendingCommand?.status === 'pending' ||
+    pendingCommand?.status === 'running';
+
   return (
     <div className="ai-message group flex w-full flex-col items-start">
-      <div className="w-full max-w-[92%] text-[15.25px] tracking-[-0.011em] text-[#ececf1] antialiased">
-        {blocks}
-        {isStreaming ? (
-          <span
-            className="ml-1 inline-block h-[15px] w-[7px] translate-y-[2px] animate-pulse rounded-[2px] bg-[#b39dff]"
-            aria-hidden="true"
-          />
-        ) : null}
-      </div>
+      {agentSteps && agentSteps.length > 0 ? (
+        <AgentExecutionTimeline
+          steps={agentSteps}
+          taskTitle={agentTaskTitle}
+          isStreaming={isStreaming}
+          isWaitingApproval={Boolean(isWaitingApproval)}
+        />
+      ) : null}
+
+      {pendingCommand ? (
+        <TerminalApprovalCard
+          pendingCommand={pendingCommand}
+          disabled={isStreaming && pendingCommand.status !== 'pending'}
+          onDecision={(action, finalCommand) => {
+            onTerminalDecision?.(action, finalCommand);
+          }}
+        />
+      ) : null}
+
+      {text.trim().length > 0 || isStreaming ? (
+        <div className="w-full max-w-[92%] text-[15.25px] tracking-[-0.011em] text-[#ececf1] antialiased">
+          {blocks}
+          {isStreaming ? (
+            <span
+              className="ml-1 inline-block h-[15px] w-[7px] translate-y-[2px] animate-pulse rounded-[2px] bg-white"
+              aria-hidden="true"
+            />
+          ) : null}
+        </div>
+      ) : null}
 
       {!isStreaming && text.trim().length > 0 ? (
         <div className="mt-2 flex items-center gap-1 opacity-85 transition-opacity duration-150 group-hover:opacity-100">
@@ -628,7 +869,7 @@ export default function AiMessage({
             aria-pressed={speaking}
             className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors ${
               speaking
-                ? 'bg-[#b39dff]/15 text-[#b39dff]'
+                ? 'bg-white/15 text-white'
                 : 'text-[#8e8ea0] hover:bg-white/[0.06] hover:text-[#e4e4e7]'
             }`}
           >
@@ -682,7 +923,7 @@ export default function AiMessage({
             {copiedAll ? (
               <>
                 <svg
-                  className="h-3.5 w-3.5 text-emerald-400"
+                  className="h-3.5 w-3.5 text-white"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -692,7 +933,7 @@ export default function AiMessage({
                 >
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
-                <span className="text-emerald-400">Copied</span>
+                <span className="text-white">Copied</span>
               </>
             ) : (
               <svg

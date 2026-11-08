@@ -6,3 +6,4 @@ export * from './speech_transcriber.js';
 export * from './embeddings.js';
 export * from './moderation.js';
 export * from './image_generator.js';
+export * from './agent_mode.js';

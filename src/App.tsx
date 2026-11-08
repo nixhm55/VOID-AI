@@ -1,22 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import PromptBar from './components/PromptBar';
 import LatticeLoader from './components/LatticeLoader';
 import AiMessage from './components/AiMessage';
-import Sidebar from './components/Sidebar';
+import Sidebar, { type SidebarSection } from './components/Sidebar';
 import SettingsModal from './components/SettingsModal';
-import AuthModal from './components/AuthModal';
+import AuthModal, {
+  type GuestProfileInfo,
+  loadGuestProfile,
+  saveGuestProfile,
+} from './components/AuthModal';
 import type { User } from '@supabase/supabase-js';
 import { signOutCurrentSession, subscribeToAuthState } from './lib/auth';
 import { isSupabaseConfigured } from './lib/supabase';
+import { authenticatedFetch } from './lib/api-fetch';
 import {
   streamChatCompletion,
   type StreamChatMessage,
+  type TerminalToolContinuation,
 } from './lib/chat-stream';
 import {
+  type AgentPlanStep,
   type ChatAttachment,
   type ChatAttachmentItem,
   type ChatMessage,
   type ChatSession,
+  type PendingTerminalCommand,
   type UserSettings,
   deriveChatTitle,
   loadLegacyChatSessions,
@@ -36,7 +44,10 @@ import {
   subscribeToChatHistory,
 } from './lib/chat-persistence';
 
-const sessionFingerprint = (session: ChatSession) => JSON.stringify(session);
+const sessionFingerprint = (session: ChatSession) => {
+  const lastMsg = session.messages[session.messages.length - 1];
+  return `${session.id}:${session.updatedAt}:${session.messages.length}:${session.pinned ? 1 : 0}:${session.title}:${lastMsg?.id ?? ''}:${lastMsg?.text.length ?? 0}:${lastMsg?.pendingCommand?.status ?? ''}`;
+};
 
 function createClientId(): string {
   return (
@@ -148,18 +159,200 @@ function extractAttachmentImageUrls(
   return urls;
 }
 
+const CHAT_SUGGESTIONS = [
+  {
+    id: 'chat-1',
+    label: 'VOID app glass voice search UI',
+    prompt: 'Design a sleek glass voice search UI component for my VOID app',
+    icon: 'image',
+  },
+  {
+    id: 'chat-2',
+    label: 'Design a poster based on my taste',
+    prompt: 'Create an image of a minimalist futuristic dark tech poster',
+    icon: 'sparkle',
+  },
+  {
+    id: 'chat-3',
+    label: 'Find top mystery thriller movies',
+    prompt: 'Find the top mystery thriller movies with twists to watch tonight',
+    icon: 'ticket',
+  },
+];
+
+function SuggestionIcon({ kind }: { kind: string }) {
+  if (kind === 'image') {
+    return (
+      <svg
+        className="h-4 w-4 shrink-0 text-[#a1a1aa]"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="3" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <polyline points="21 15 16 10 5 21" />
+      </svg>
+    );
+  }
+  if (kind === 'ticket') {
+    return (
+      <svg
+        className="h-4 w-4 shrink-0 text-[#a1a1aa]"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="2" y="6" width="20" height="12" rx="2" />
+        <path d="M6 12h.01M18 12h.01" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      className="h-4 w-4 shrink-0 text-[#a1a1aa]"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z" />
+    </svg>
+  );
+}
+
+/**
+ * Gemini-Style User Message Bubble:
+ * - Symmetric `rounded-2xl` on all 4 corners (no sharp bottom-right tooth!)
+ * - Collapses long messages to 4 lines by default with a compact `v` / `^` chevron button to expand/collapse.
+ */
+function UserMessageBubble({
+  text,
+  agentMode,
+}: {
+  text: string;
+  agentMode?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isLongMessage = useMemo(
+    () => text.length > 210 || text.split('\n').length > 4,
+    [text],
+  );
+
+  return (
+    <div className="relative flex max-w-[82%] items-start gap-2 rounded-2xl bg-[#23242a] px-4 py-2.5 text-[15px] leading-relaxed text-[#f5f5f5] shadow-sm">
+      <div
+        className={`min-w-0 flex-1 break-words ${
+          isLongMessage && !expanded ? 'line-clamp-4' : ''
+        }`}
+      >
+        {agentMode ? (
+          <span className="mr-2 inline-flex items-center gap-1 rounded border border-white/20 bg-white/10 px-1.5 py-0.5 text-[10.5px] font-medium text-[#e4e4e7]">
+            Agent
+          </span>
+        ) : null}
+        {text}
+      </div>
+
+      {isLongMessage ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Collapse message' : 'Expand message'}
+          aria-label={expanded ? 'Collapse message' : 'Expand message'}
+          aria-expanded={expanded}
+          className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[#a1a1aa] transition-colors hover:bg-white/[0.08] hover:text-white"
+        >
+          <svg
+            className={`h-4 w-4 transition-transform duration-200 ${
+              expanded ? 'rotate-180' : ''
+            }`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Top Capsule Switcher (`Chat` | `Agent`) — visible ONLY on an empty New Chat.
+ */
+function TopModeCapsule({
+  agentMode,
+  onSelectMode,
+}: {
+  agentMode: boolean;
+  onSelectMode: (isAgent: boolean) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Conversation mode"
+      className="inline-flex items-center rounded-full border border-white/[0.08] bg-[#141418]/90 p-1 shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md transition-all duration-300"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={!agentMode}
+        onClick={() => onSelectMode(false)}
+        className={`rounded-full px-4 py-1 text-[13px] font-medium transition-all duration-200 ${
+          !agentMode
+            ? 'border border-white/[0.12] bg-[#2b2b33] text-white shadow-sm'
+            : 'border border-transparent text-[#9a9aa2] hover:text-[#e4e4e7]'
+        }`}
+      >
+        Chat
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={agentMode}
+        onClick={() => onSelectMode(true)}
+        className={`rounded-full px-4 py-1 text-[13px] font-medium transition-all duration-200 ${
+          agentMode
+            ? 'border border-white/[0.16] bg-[#323238] text-white shadow-sm'
+            : 'border border-transparent text-[#9a9aa2] hover:text-[#e4e4e7]'
+        }`}
+      >
+        Agent
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>(() =>
     loadChatSessions(),
   );
-  const [activeChatId, setActiveChatId] = useState<string | null>(() => {
-    const initial = loadChatSessions();
-    return initial.length > 0 ? initial[0].id : null;
-  });
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<SidebarSection>('chat');
+  const [agentMode, setAgentMode] = useState<boolean>(false);
+  const [connectedFolders, setConnectedFolders] = useState<string[]>([]);
+  const [newChatAnimKey, setNewChatAnimKey] = useState<number>(1);
+
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
-  const [authOpen, setAuthOpen] = useState(false);
+  const [guestProfile, setGuestProfile] = useState<GuestProfileInfo | null>(
+    () => loadGuestProfile(),
+  );
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
   const [historyReady, setHistoryReady] = useState(!isSupabaseConfigured());
   const [historyWarning, setHistoryWarning] = useState<string | null>(null);
   const [settings, setSettings] = useState<UserSettings>(() =>
@@ -173,6 +366,7 @@ export default function App() {
     null,
   );
   const controller = useRef<AbortController | null>(null);
+  const checkedInitialAuthModalRef = useRef(false);
 
   const handleStopGeneration = () => {
     controller.current?.abort();
@@ -180,7 +374,10 @@ export default function App() {
     setBusy(false);
     setStreamingId(null);
   };
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const latestUserMsgRef = useRef<HTMLDivElement | null>(null);
+  const lastScrolledUserMsgIdRef = useRef<string | null>(null);
   const historyUserId = useRef<string | null | undefined>(undefined);
   const historyRequest = useRef(0);
   const persistedHashes = useRef<Record<string, string>>({});
@@ -193,6 +390,143 @@ export default function App() {
   const activeSession =
     sessions.find((s) => s.id === activeChatId) ?? null;
   const messages: ChatMessage[] = activeSession?.messages ?? [];
+
+  const lastUserMessageIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return i;
+    }
+    return -1;
+  }, [messages]);
+
+  const lastUserMessageId =
+    lastUserMessageIndex >= 0 ? messages[lastUserMessageIndex].id : null;
+
+  useEffect(() => {
+    if (!lastUserMessageId) {
+      lastScrolledUserMsgIdRef.current = null;
+      return;
+    }
+    if (lastScrolledUserMsgIdRef.current === lastUserMessageId) return;
+    lastScrolledUserMsgIdRef.current = lastUserMessageId;
+
+    requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      const targetEl = latestUserMsgRef.current;
+      if (container && targetEl) {
+        const targetTop = Math.max(0, targetEl.offsetTop - 24);
+        container.scrollTo({
+          top: targetTop,
+          behavior: 'smooth',
+        });
+      }
+    });
+  }, [lastUserMessageId]);
+
+  const isSessionLocked = messages.length > 0;
+  const lockedSessionAgentMode = useMemo(() => {
+    if (!activeSession || activeSession.messages.length === 0) return null;
+    if (typeof activeSession.agentMode === 'boolean') {
+      return activeSession.agentMode;
+    }
+    return activeSession.messages.some((m) => Boolean(m.agentMode));
+  }, [activeSession]);
+
+  const effectiveAgentMode =
+    lockedSessionAgentMode !== null ? lockedSessionAgentMode : agentMode;
+
+  const isAuthenticatedAccount = Boolean(authUser && !authUser.is_anonymous);
+  const hasAnyActiveSession = Boolean(isAuthenticatedAccount || guestProfile);
+
+  // On first visit (if neither signed in with a real account nor logged in as Guest in localStorage),
+  // automatically open the Login Modal! Once Guest or Account is logged in, it persists across refreshes/restarts.
+  useEffect(() => {
+    if (!historyReady || checkedInitialAuthModalRef.current) return;
+    checkedInitialAuthModalRef.current = true;
+    const savedGuest = loadGuestProfile();
+    if (!authUser && !savedGuest) {
+      setAuthOpen(true);
+    } else if (authUser?.is_anonymous && !savedGuest) {
+      setAuthOpen(true);
+    }
+  }, [historyReady, authUser]);
+
+  // Extract Google / Authenticated user's display name or Guest name, preserving exact user-entered casing!
+  // Returns empty string '' when no account or guest is logged in yet (so greeting says "Hi, what's on your mind?").
+  const accountDisplayName = useMemo(() => {
+    if (isAuthenticatedAccount && authUser) {
+      const meta = authUser.user_metadata as
+        | Record<string, unknown>
+        | undefined;
+      const fullName =
+        (typeof meta?.full_name === 'string' && meta.full_name.trim()) ||
+        (typeof meta?.name === 'string' && meta.name.trim()) ||
+        (typeof meta?.user_name === 'string' && meta.user_name.trim()) ||
+        '';
+      if (fullName) return fullName;
+
+      const email = authUser.email ?? '';
+      if (email) {
+        return email.split('@')[0] || 'Account';
+      }
+      if (authUser.phone) return authUser.phone;
+    }
+    if (guestProfile?.name) {
+      return guestProfile.name;
+    }
+    return '';
+  }, [authUser, isAuthenticatedAccount, guestProfile]);
+
+  const accountAvatarUrl = useMemo(() => {
+    if (!isAuthenticatedAccount || !authUser) return undefined;
+    const meta = authUser.user_metadata as Record<string, unknown> | undefined;
+    const url =
+      (typeof meta?.avatar_url === 'string' && meta.avatar_url.trim()) ||
+      (typeof meta?.picture === 'string' && meta.picture.trim()) ||
+      '';
+    return url || undefined;
+  }, [authUser, isAuthenticatedAccount]);
+
+  // Preserve exact casing typed by the user; if not logged in / no guest name yet, empty string -> "Hi, what's on your mind?"
+  const userFirstName = useMemo(() => {
+    if (!accountDisplayName.trim()) return '';
+    return accountDisplayName.trim().split(/\s+/)[0] || '';
+  }, [accountDisplayName]);
+
+  const galleryImages = useMemo(() => {
+    const list: Array<{ id: string; url: string; title: string }> = [];
+    for (const sess of sessions) {
+      for (const m of sess.messages) {
+        for (const url of extractAttachmentImageUrls(m.attachments)) {
+          list.push({
+            id: `${m.id}-att-${list.length}`,
+            url,
+            title: sess.title || 'Uploaded image',
+          });
+        }
+        if (m.text.includes('![') && m.text.includes('](')) {
+          const lines = m.text.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('![') && trimmed.endsWith(')')) {
+              const mid = trimmed.indexOf('](');
+              if (mid >= 2) {
+                const alt = trimmed.slice(2, mid);
+                const src = trimmed.slice(mid + 2, -1).trim();
+                if (src) {
+                  list.push({
+                    id: `${m.id}-gen-${list.length}`,
+                    url: src,
+                    title: alt || sess.title || 'Generated image',
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return list;
+  }, [sessions]);
 
   useEffect(() => {
     if (!historyReady) return;
@@ -261,7 +595,7 @@ export default function App() {
         void loadAndMigrateChatHistory(nextUser.id).then((result) => {
           if (historyRequest.current !== requestId) return;
           setSessions(result.sessions);
-          setActiveChatId(result.sessions[0]?.id ?? null);
+          setActiveChatId(null);
           setHistoryWarning(result.warning);
           if (!result.warning) {
             persistedHashes.current = Object.fromEntries(
@@ -284,7 +618,7 @@ export default function App() {
         const localSessions =
           event === 'INITIAL_SESSION' ? loadLegacyChatSessions() : [];
         setSessions(localSessions);
-        setActiveChatId(localSessions[0]?.id ?? null);
+        setActiveChatId(null);
         setHistoryReady(true);
       }
     });
@@ -320,17 +654,58 @@ export default function App() {
     };
   }, [authUser?.id, historyReady]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages.length, busy, streamingId]);
+  const handleConnectFolder = async () => {
+    try {
+      const win = window as unknown as {
+        showDirectoryPicker?: () => Promise<{ name: string }>;
+      };
+      if (typeof win.showDirectoryPicker === 'function') {
+        const handle = await win.showDirectoryPicker();
+        if (handle?.name) {
+          setConnectedFolders((prev) =>
+            prev.includes(handle.name) ? prev : [...prev, handle.name],
+          );
+          return;
+        }
+      }
+    } catch {
+      return;
+    }
 
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.setAttribute('webkitdirectory', '');
+    input.onchange = () => {
+      const firstFile = input.files?.[0] as
+        | (File & { webkitRelativePath?: string })
+        | undefined;
+      const folderName =
+        firstFile?.webkitRelativePath?.split('/')[0] ||
+        firstFile?.name ||
+        'Workspace';
+      setConnectedFolders((prev) =>
+        prev.includes(folderName) ? prev : [...prev, folderName],
+      );
+    };
+    input.click();
+  };
+
+  const handleDisconnectFolder = (folderName?: string) => {
+    if (!folderName) return;
+    setConnectedFolders((prev) => prev.filter((name) => name !== folderName));
+  };
+
+  // New Chat resets to 'Chat' mode and triggers the blooming entrance animation
   const handleNewChat = () => {
     if (busy) {
       controller.current?.abort();
       setBusy(false);
       setStreamingId(null);
     }
+    setActiveSection('chat');
     setActiveChatId(null);
+    setAgentMode(false);
+    setNewChatAnimKey((k) => k + 1);
   };
 
   const handleSelectChat = (id: string) => {
@@ -339,6 +714,15 @@ export default function App() {
       setBusy(false);
       setStreamingId(null);
     }
+    const targetSession = sessions.find((s) => s.id === id);
+    if (targetSession) {
+      const targetIsAgent =
+        typeof targetSession.agentMode === 'boolean'
+          ? targetSession.agentMode
+          : targetSession.messages.some((m) => Boolean(m.agentMode));
+      setAgentMode(targetIsAgent);
+    }
+    setActiveSection('chat');
     setActiveChatId(id);
   };
 
@@ -359,7 +743,17 @@ export default function App() {
     setSessions((prev) => {
       const remaining = prev.filter((s) => s.id !== id);
       if (id === activeChatId) {
-        setActiveChatId(remaining.length > 0 ? remaining[0].id : null);
+        const nextSession = remaining.length > 0 ? remaining[0] : null;
+        setActiveChatId(nextSession ? nextSession.id : null);
+        if (nextSession) {
+          const nextIsAgent =
+            typeof nextSession.agentMode === 'boolean'
+              ? nextSession.agentMode
+              : nextSession.messages.some((m) => Boolean(m.agentMode));
+          setAgentMode(nextIsAgent);
+        } else {
+          setAgentMode(false);
+        }
       }
       return remaining;
     });
@@ -382,6 +776,7 @@ export default function App() {
     }
     setSessions([]);
     setActiveChatId(null);
+    setAgentMode(false);
     persistedHashes.current = {};
     if (authUser && historyReady) {
       void deleteAllChatHistory(authUser.id).catch((error: unknown) => {
@@ -393,10 +788,37 @@ export default function App() {
     }
   };
 
+  /**
+   * Logs out of any account (both Google/Email accounts AND Guest sessions)
+   * when triggered from Settings -> General -> Log out or AuthModal.
+   */
+  const handleFullLogOut = async () => {
+    if (busy) {
+      controller.current?.abort();
+      setBusy(false);
+      setStreamingId(null);
+    }
+    saveGuestProfile(null);
+    setGuestProfile(null);
+    setActiveChatId(null);
+    setAgentMode(false);
+    setSettingsOpen(false);
+    try {
+      if (authUser) {
+        await signOutCurrentSession();
+      }
+    } catch {
+      // Ignore if session already expired
+    }
+    setAuthUser(null);
+    setAuthOpen(true);
+  };
+
   const appendOrUpdateSessionMessages = (
     sessionId: string,
     updater: (prevMessages: ChatMessage[]) => ChatMessage[],
     fallbackFirstText = '',
+    lockedAgentFlag = false,
   ) => {
     setSessions((prev) => {
       const exists = prev.some((s) => s.id === sessionId);
@@ -406,6 +828,7 @@ export default function App() {
           id: sessionId,
           title: deriveChatTitle(fallbackFirstText || 'Image analysis'),
           messages: initialMessages,
+          agentMode: lockedAgentFlag,
           pinned: false,
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -424,10 +847,261 @@ export default function App() {
           ...s,
           title: nextTitle,
           messages: nextMsgs,
+          agentMode: s.agentMode ?? lockedAgentFlag,
           updatedAt: Date.now(),
         };
       });
     });
+  };
+
+  const handleTerminalDecision = async (
+    sessionId: string,
+    aiMsgId: string,
+    action: 'allow' | 'deny' | 'skip',
+    finalCommand: string,
+  ) => {
+    const targetSession = latestSessions.current.find(
+      (s) => s.id === sessionId,
+    );
+    const targetAiMsg = targetSession?.messages.find((m) => m.id === aiMsgId);
+    if (!targetSession || !targetAiMsg || !targetAiMsg.pendingCommand) return;
+
+    const currentPending = targetAiMsg.pendingCommand;
+
+    const immediateStatus: PendingTerminalCommand['status'] =
+      action === 'allow'
+        ? 'running'
+        : action === 'deny'
+          ? 'denied'
+          : 'skipped';
+
+    appendOrUpdateSessionMessages(
+      sessionId,
+      (prev) =>
+        prev.map((m) => {
+          if (m.id !== aiMsgId) return m;
+          const updatedSteps = m.agentSteps?.map((s) =>
+            s.id === 'step-terminal'
+              ? {
+                  ...s,
+                  status:
+                    action === 'allow'
+                      ? ('running' as const)
+                      : ('completed' as const),
+                  detail:
+                    action === 'allow'
+                      ? `Executing \`${finalCommand}\`…`
+                      : action === 'deny'
+                        ? 'Command rejected by user'
+                        : 'Command skipped by user',
+                }
+              : s,
+          );
+          return {
+            ...m,
+            agentSteps: updatedSteps,
+            pendingCommand: {
+              ...currentPending,
+              command: finalCommand,
+              status: immediateStatus,
+            },
+          };
+        }),
+      '',
+      true,
+    );
+
+    let terminalResultPayload: TerminalToolContinuation = {
+      id: currentPending.id,
+      command: finalCommand,
+      cwd: currentPending.cwd,
+      status: action === 'deny' ? 'denied' : 'skipped',
+      output:
+        action === 'deny'
+          ? 'Command execution rejected by user.'
+          : 'Command skipped by user.',
+      exitCode: null,
+    };
+
+    try {
+      const termRes = await authenticatedFetch('/api/terminal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          command: finalCommand,
+          cwd: currentPending.cwd,
+          connectedFolders,
+        }),
+      });
+
+      if (termRes.ok) {
+        const data = (await termRes.json()) as {
+          command?: string;
+          status?: 'completed' | 'failed' | 'denied' | 'skipped';
+          output?: string;
+          exitCode?: number | null;
+          cwd?: string;
+        };
+        terminalResultPayload = {
+          id: currentPending.id,
+          command: data.command || finalCommand,
+          cwd: data.cwd ?? currentPending.cwd,
+          status:
+            data.status ??
+            (action === 'allow'
+              ? 'completed'
+              : action === 'deny'
+                ? 'denied'
+                : 'skipped'),
+          output: data.output ?? '',
+          exitCode: data.exitCode ?? 0,
+        };
+      }
+    } catch (err) {
+      terminalResultPayload = {
+        id: currentPending.id,
+        command: finalCommand,
+        cwd: currentPending.cwd,
+        status:
+          action === 'allow'
+            ? 'failed'
+            : action === 'deny'
+              ? 'denied'
+              : 'skipped',
+        output:
+          err instanceof Error ? err.message : 'Terminal execution failed.',
+        exitCode: 1,
+      };
+    }
+
+    appendOrUpdateSessionMessages(
+      sessionId,
+      (prev) =>
+        prev.map((m) => {
+          if (m.id !== aiMsgId) return m;
+          const updatedSteps = m.agentSteps?.map((s) =>
+            s.id === 'step-terminal'
+              ? {
+                  ...s,
+                  status:
+                    terminalResultPayload.status === 'failed'
+                      ? ('failed' as const)
+                      : ('completed' as const),
+                  detail:
+                    action === 'allow'
+                      ? `Executed \`${terminalResultPayload.command}\` (exit ${terminalResultPayload.exitCode ?? 0})`
+                      : action === 'deny'
+                        ? 'Command rejected by user'
+                        : 'Command skipped by user',
+                }
+              : s,
+          );
+          return {
+            ...m,
+            agentSteps: updatedSteps,
+            pendingCommand: {
+              ...currentPending,
+              command: terminalResultPayload.command,
+              cwd: terminalResultPayload.cwd,
+              status: terminalResultPayload.status,
+              output: terminalResultPayload.output,
+              exitCode: terminalResultPayload.exitCode,
+            },
+          };
+        }),
+      '',
+      true,
+    );
+
+    const msgIdx = targetSession.messages.findIndex((m) => m.id === aiMsgId);
+    const priorMessages =
+      msgIdx >= 0
+        ? targetSession.messages.slice(0, msgIdx)
+        : targetSession.messages;
+
+    const historyPayload: StreamChatMessage[] = priorMessages
+      .filter(
+        (m) =>
+          m.text.trim().length > 0 ||
+          extractAttachmentImageUrls(m.attachments).length > 0,
+      )
+      .map((m) => {
+        const msgImages = extractAttachmentImageUrls(m.attachments);
+        return {
+          role: m.role,
+          content:
+            m.text.trim() ||
+            (msgImages.length > 0 ? 'Please analyze this image.' : ''),
+          ...(msgImages.length > 0 ? { imageUrls: msgImages } : {}),
+        };
+      });
+
+    setBusy(true);
+    setStreamingId(aiMsgId);
+    setLastCompletedAiId(null);
+    controller.current = new AbortController();
+
+    try {
+      await streamChatCompletion({
+        messages: historyPayload,
+        model: targetSession.modelKey || 'void-combo',
+        effort: selectedEffort || 'High',
+        agentMode: true,
+        connectedFolders,
+        terminalToolResult: terminalResultPayload,
+        embeddingModel: settings.embeddingModel,
+        moderationEnabled: settings.moderationEnabled,
+        signal: controller.current.signal,
+        onAgentSteps: (steps, taskTitle) => {
+          appendOrUpdateSessionMessages(
+            sessionId,
+            (prev) =>
+              prev.map((m) =>
+                m.id === aiMsgId
+                  ? {
+                      ...m,
+                      agentSteps: steps,
+                      ...(taskTitle ? { agentTaskTitle: taskTitle } : {}),
+                    }
+                  : m,
+              ),
+            '',
+            true,
+          );
+        },
+        onChunk: (_delta, fullText) => {
+          appendOrUpdateSessionMessages(
+            sessionId,
+            (prev) =>
+              prev.map((m) =>
+                m.id === aiMsgId ? { ...m, text: fullText } : m,
+              ),
+            '',
+            true,
+          );
+        },
+      });
+      setLastCompletedAiId(aiMsgId);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
+      const errMsg =
+        err instanceof Error
+          ? err.message
+          : 'Connection error while resuming agent response.';
+      appendOrUpdateSessionMessages(
+        sessionId,
+        (prev) =>
+          prev.map((m) => (m.id === aiMsgId ? { ...m, text: errMsg } : m)),
+        '',
+        true,
+      );
+    } finally {
+      setBusy(false);
+      setStreamingId(null);
+    }
   };
 
   const send = async (
@@ -436,17 +1110,28 @@ export default function App() {
       attachments,
       model,
       effort,
+      agentMode: overrideAgentMode,
     }: {
       attachments: ChatAttachmentItem[];
       model: { key: string; name?: string; shortName?: string };
       effort: string;
+      agentMode?: boolean;
     },
   ) => {
-    if (isSupabaseConfigured() && (!authUser || !historyReady)) {
+    if (!hasAnyActiveSession) {
       setAuthOpen(true);
       return;
     }
 
+    const isAgent =
+      lockedSessionAgentMode !== null
+        ? lockedSessionAgentMode
+        : overrideAgentMode !== undefined
+          ? overrideAgentMode
+          : agentMode;
+
+    setAgentMode(isAgent);
+    setActiveSection('chat');
     const targetChatId = activeChatId ?? createClientId();
     if (!activeChatId) {
       setActiveChatId(targetChatId);
@@ -462,22 +1147,22 @@ export default function App() {
       role: 'user',
       text: text.trim(),
       attachments: attachments.length > 0 ? [...attachments] : undefined,
+      agentMode: Boolean(isAgent),
       createdAt: Date.now(),
     };
 
     const existingMessages = activeSession?.messages ?? [];
 
-    // "4 Argon" is kept blank — nothing is configured inside it yet
     if (model?.key === '4-Argon' || model?.key === '4-argan') {
       appendOrUpdateSessionMessages(
         targetChatId,
         (prev) => [...prev, userMsg],
         effectiveText,
+        Boolean(isAgent),
       );
       return;
     }
 
-    // Store semantic memory vector in the dimension-partitioned store (`3072d` or `1536d`)
     if (effectiveText.length > 0) {
       void addSemanticMemory({
         text: effectiveText,
@@ -507,6 +1192,7 @@ export default function App() {
       targetChatId,
       (prev) => [...prev, userMsg],
       effectiveText,
+      Boolean(isAgent),
     );
     setBusy(true);
     setStreamingId(null);
@@ -514,6 +1200,72 @@ export default function App() {
     controller.current = new AbortController();
 
     let createdAiBubble = false;
+    let latestSteps: AgentPlanStep[] | undefined;
+    let latestTaskTitle: string | undefined;
+    let latestPendingCmd: PendingTerminalCommand | undefined;
+
+    const ensureOrUpdateAiBubble = (options: {
+      nextText?: string;
+      nextSteps?: AgentPlanStep[];
+      nextTaskTitle?: string;
+      nextPendingCmd?: PendingTerminalCommand;
+    }) => {
+      if (options.nextSteps) {
+        latestSteps = options.nextSteps;
+      }
+      if (options.nextTaskTitle) {
+        latestTaskTitle = options.nextTaskTitle;
+      }
+      if (options.nextPendingCmd) {
+        latestPendingCmd = options.nextPendingCmd;
+      }
+      if (!createdAiBubble) {
+        createdAiBubble = true;
+        setStreamingId(aiMsgId);
+        appendOrUpdateSessionMessages(
+          targetChatId,
+          (prev) => [
+            ...prev,
+            {
+              id: aiMsgId,
+              role: 'assistant',
+              text: options.nextText ?? '',
+              agentMode: Boolean(isAgent),
+              agentSteps: latestSteps,
+              agentTaskTitle: latestTaskTitle,
+              pendingCommand: latestPendingCmd,
+              createdAt: Date.now(),
+            },
+          ],
+          effectiveText,
+          Boolean(isAgent),
+        );
+      } else {
+        appendOrUpdateSessionMessages(
+          targetChatId,
+          (prev) =>
+            prev.map((msg) =>
+              msg.id === aiMsgId
+                ? {
+                    ...msg,
+                    ...(options.nextText !== undefined
+                      ? { text: options.nextText }
+                      : {}),
+                    ...(latestSteps ? { agentSteps: latestSteps } : {}),
+                    ...(latestTaskTitle
+                      ? { agentTaskTitle: latestTaskTitle }
+                      : {}),
+                    ...(latestPendingCmd
+                      ? { pendingCommand: latestPendingCmd }
+                      : {}),
+                  }
+                : msg,
+            ),
+          effectiveText,
+          Boolean(isAgent),
+        );
+      }
+    };
 
     try {
       const effectiveEffort = effort || selectedEffort || 'High';
@@ -521,33 +1273,30 @@ export default function App() {
         messages: historyPayload,
         model: model?.key || 'void-combo',
         effort: effectiveEffort,
+        agentMode: Boolean(isAgent),
+        connectedFolders,
         embeddingModel: settings.embeddingModel,
         moderationEnabled: settings.moderationEnabled,
         imageUrls: uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined,
         signal: controller.current.signal,
+        onAgentSteps: (steps, taskTitle) => {
+          ensureOrUpdateAiBubble({
+            nextSteps: steps,
+            nextTaskTitle: taskTitle,
+          });
+        },
+        onPendingCommand: (pendingCmd) => {
+          ensureOrUpdateAiBubble({
+            nextPendingCmd: pendingCmd,
+          });
+        },
         onChunk: (_delta, fullText) => {
-          if (!createdAiBubble) {
-            createdAiBubble = true;
-            setStreamingId(aiMsgId);
-            appendOrUpdateSessionMessages(targetChatId, (prev) => [
-              ...prev,
-              {
-                id: aiMsgId,
-                role: 'assistant',
-                text: fullText,
-                createdAt: Date.now(),
-              },
-            ]);
-          } else {
-            appendOrUpdateSessionMessages(targetChatId, (prev) =>
-              prev.map((msg) =>
-                msg.id === aiMsgId ? { ...msg, text: fullText } : msg,
-              ),
-            );
-          }
+          ensureOrUpdateAiBubble({
+            nextText: fullText,
+          });
         },
       });
-      if (createdAiBubble) {
+      if (createdAiBubble && !latestPendingCmd) {
         setLastCompletedAiId(aiMsgId);
       }
     } catch (err) {
@@ -558,30 +1307,82 @@ export default function App() {
         err instanceof Error
           ? err.message
           : 'Connection error. Please try again.';
-      appendOrUpdateSessionMessages(targetChatId, (prev) => [
-        ...prev,
-        { id: aiMsgId, role: 'assistant', text: errMsg, createdAt: Date.now() },
-      ]);
+      appendOrUpdateSessionMessages(
+        targetChatId,
+        (prev) => [
+          ...prev,
+          {
+            id: aiMsgId,
+            role: 'assistant',
+            text: errMsg,
+            agentMode: Boolean(isAgent),
+            createdAt: Date.now(),
+          },
+        ],
+        effectiveText,
+        Boolean(isAgent),
+      );
     } finally {
       setBusy(false);
       setStreamingId(null);
     }
   };
 
+  const isEmptyNewChat = activeSection === 'chat' && !isSessionLocked;
+  const isAgentWorkingOrStarted = effectiveAgentMode && !isEmptyNewChat;
+  const isAgentIdleHero = effectiveAgentMode && isEmptyNewChat;
+  const sidebarThemeMode = isAgentWorkingOrStarted
+    ? 'agent-working'
+    : isAgentIdleHero
+      ? 'agent-idle'
+      : 'chat';
+
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-[#09090b] text-[#f5f5f5]">
-      {/* Sleek Collapsible Sidebar */}
+    <div
+      className={`relative flex h-screen w-full overflow-hidden text-[#f5f5f5] transition-colors duration-500 ${
+        isAgentWorkingOrStarted
+          ? 'bg-[#000000]'
+          : isAgentIdleHero
+            ? 'bg-[#151619]'
+            : 'bg-[#080a10]'
+      }`}
+    >
+      {/* Dedicated Full-Screen Background Layer Behind Both Sidebar & Main Viewport (so Sidebar is true glass on top of it!) */}
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-0 z-0 transition-opacity duration-500 ease-in-out ${
+          effectiveAgentMode ? 'opacity-0' : 'opacity-100'
+        }`}
+        style={{
+          background:
+            'radial-gradient(circle at 12% 24%, rgba(44, 78, 195, 0.22) 0%, rgba(22, 40, 112, 0.1) 34%, rgba(8, 10, 16, 0) 68%), radial-gradient(circle at 58% 54%, rgba(36, 68, 178, 0.27) 0%, rgba(22, 38, 110, 0.14) 38%, rgba(8, 10, 16, 0) 72%)',
+        }}
+      />
+
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-0 z-0 transition-opacity duration-500 ease-in-out ${
+          isAgentIdleHero ? 'opacity-100' : 'opacity-0'
+        }`}
+        style={{
+          background:
+            'radial-gradient(circle at 12% 24%, rgba(165, 168, 178, 0.15) 0%, rgba(95, 97, 106, 0.07) 34%, rgba(21, 22, 25, 0) 68%), radial-gradient(circle at 58% 52%, rgba(160, 162, 172, 0.16) 0%, rgba(95, 97, 106, 0.08) 40%, rgba(21, 22, 25, 0) 72%)',
+        }}
+      />
+
+      {/* Sleek 216px Tinted Glass Sidebar placed ON TOP of the background layer */}
       <Sidebar
         open={sidebarOpen}
         sessions={sessions}
         activeChatId={activeChatId}
-        accountLabel={
-          authUser?.is_anonymous
-            ? 'Guest session'
-            : authUser?.email ?? authUser?.phone ?? 'Sign in'
-        }
+        activeSection={activeSection}
+        themeMode={sidebarThemeMode}
+        isAuthenticatedAccount={isAuthenticatedAccount}
+        accountName={accountDisplayName}
+        accountAvatarUrl={accountAvatarUrl}
         onToggle={() => setSidebarOpen((v) => !v)}
         onNewChat={handleNewChat}
+        onSelectSection={(sec) => setActiveSection(sec)}
         onSelectChat={handleSelectChat}
         onTogglePin={handleTogglePin}
         onDeleteChat={handleDeleteChat}
@@ -589,26 +1390,26 @@ export default function App() {
         onOpenAuth={() => setAuthOpen(true)}
       />
 
-      {/* Main Chat Viewport */}
-      <main className="relative flex h-full flex-1 flex-col overflow-hidden bg-[#09090b]">
-        {/* Minimalist Top Bar (visible when sidebar is collapsed or on mobile) */}
-        <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center justify-between px-4">
-          <div className="flex items-center gap-1.5">
+      {/* Main Viewport */}
+      <main className="relative z-10 flex h-full flex-1 flex-col overflow-hidden bg-transparent">
+        {/* Top Bar */}
+        <header className="relative z-10 flex h-14 shrink-0 items-center justify-between px-4">
+          <div className="flex w-28 items-center gap-1.5">
             {!sidebarOpen ? (
               <>
                 <button
                   type="button"
                   onClick={() => setSidebarOpen(true)}
-                  title="Open sidebar"
-                  aria-label="Open sidebar"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#a1a1aa] transition-colors hover:bg-white/[0.06] hover:text-white"
+                  title="Toggle sidebar"
+                  aria-label="Toggle sidebar"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
                 >
                   <svg
                     className="h-4 w-4"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.9"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   >
@@ -622,33 +1423,45 @@ export default function App() {
                   onClick={handleNewChat}
                   title="New chat"
                   aria-label="New chat"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#a1a1aa] transition-colors hover:bg-white/[0.06] hover:text-white"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
                 >
                   <svg
                     className="h-4 w-4"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.9"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   >
-                    <path d="M12 20h9" />
-                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                   </svg>
                 </button>
               </>
             ) : null}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-center">
+            {isEmptyNewChat ? (
+              <TopModeCapsule
+                agentMode={effectiveAgentMode}
+                onSelectMode={(next) => {
+                  setAgentMode(next);
+                  setNewChatAnimKey((k) => k + 1);
+                }}
+              />
+            ) : null}
+          </div>
+
+          <div className="flex w-28 items-center justify-end gap-2">
             {!sidebarOpen ? (
               <button
                 type="button"
                 onClick={() => setSettingsOpen(true)}
                 title="Settings"
                 aria-label="Settings"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#a1a1aa] transition-colors hover:bg-white/[0.06] hover:text-white"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
               >
                 <svg
                   className="h-4 w-4"
@@ -669,153 +1482,387 @@ export default function App() {
 
         {historyWarning ? (
           <div
-            className="mx-auto mt-2 w-[calc(100%-2rem)] max-w-[760px] rounded-lg border border-amber-400/20 bg-amber-400/[0.07] px-3 py-2 text-xs text-amber-100/80"
+            className="relative z-10 mx-auto mt-2 w-[calc(100%-2rem)] max-w-[720px] rounded-lg border border-amber-400/20 bg-amber-400/[0.07] px-3 py-2 text-xs text-amber-100/80"
             role="status"
           >
             {historyWarning}
           </div>
         ) : null}
 
-        {/* Scrollable Conversation Area */}
-        <div className="flex-1 overflow-y-auto px-6 pt-4 pb-44">
-          <div
-            className={`mx-auto flex w-full max-w-[760px] flex-col ${
-              settings.compactMode ? 'gap-4' : 'gap-6'
-            }`}
-          >
-            {messages.map((msg) =>
-              msg.role === 'user' ? (
-                <div key={msg.id} className="flex flex-col items-end gap-2">
-                  {msg.attachments && msg.attachments.length > 0 ? (
-                    <div className="flex flex-wrap justify-end gap-2">
-                      {msg.attachments.map((item, i) => {
-                        const isObj = item && typeof item === 'object';
-                        const name = isObj ? item.name : String(item);
-                        const dataUrl = isObj ? item.dataUrl : undefined;
-                        if (dataUrl && dataUrl.startsWith('data:image/')) {
-                          return (
-                            <div
-                              key={`${name}-${i}`}
-                              className="overflow-hidden rounded-2xl border border-white/[0.12] bg-[#18181b] shadow-md"
-                            >
-                              <img
-                                src={dataUrl}
-                                alt={name}
-                                className="max-h-56 max-w-[260px] object-cover"
-                              />
+        {/* Library / Images / Video Views */}
+        {activeSection !== 'chat' ? (
+          <div className="relative z-10 flex-1 overflow-y-auto px-6 py-6">
+            <div className="mx-auto max-w-[820px]">
+              <div className="flex items-center justify-between pb-5">
+                <div>
+                  <h1 className="text-xl font-semibold text-white capitalize">
+                    {activeSection}
+                  </h1>
+                  <p className="mt-1 text-xs text-[#8e8e95]">
+                    {activeSection === 'library'
+                      ? 'Your saved conversations and media library'
+                      : activeSection === 'images'
+                        ? 'Uploaded and AI-generated images'
+                        : 'AI video workspace and media clips'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleNewChat}
+                  className="rounded-full bg-[#2b2b30] px-3.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#383840]"
+                >
+                  Back to chat
+                </button>
+              </div>
+
+              {activeSection === 'library' ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {sessions.filter((s) => s.messages.length > 0).length > 0 ? (
+                    sessions
+                      .filter((s) => s.messages.length > 0)
+                      .map((sess) => (
+                        <button
+                          key={sess.id}
+                          type="button"
+                          onClick={() => handleSelectChat(sess.id)}
+                          className="flex flex-col justify-between rounded-2xl border border-white/[0.07] bg-[#141418]/90 p-4 text-left transition-colors hover:border-white/[0.15] hover:bg-[#1a1a20]"
+                        >
+                          <div>
+                            <div className="truncate text-sm font-medium text-white">
+                              {sess.title || 'New Chat'}
                             </div>
-                          );
-                        }
-                        return (
-                          <span
-                            key={`${name}-${i}`}
-                            className="rounded-lg bg-[#27272a] px-2.5 py-1 text-xs text-[#a1a1aa]"
-                          >
-                            {name}
-                          </span>
-                        );
-                      })}
+                            <p className="mt-1 line-clamp-2 text-xs text-[#8e8e95]">
+                              {sess.messages[sess.messages.length - 1]?.text ||
+                                'Media attachment'}
+                            </p>
+                          </div>
+                          <div className="mt-3 text-[11px] text-[#6f6f76]">
+                            {sess.messages.length} messages
+                          </div>
+                        </button>
+                      ))
+                  ) : (
+                    <div className="col-span-2 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8 text-center text-sm text-[#8e8e95]">
+                      No saved items in your library yet.
                     </div>
-                  ) : null}
-                  {msg.text ? (
-                    <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[#27272a] px-4 py-2.5 text-[15px] leading-relaxed text-[#f5f5f5] break-words">
-                      {msg.text}
+                  )}
+                </div>
+              ) : activeSection === 'images' ? (
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  {galleryImages.length > 0 ? (
+                    galleryImages.map((img) => (
+                      <a
+                        key={img.id}
+                        href={img.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="group overflow-hidden rounded-2xl border border-white/[0.08] bg-[#141418]"
+                      >
+                        <img
+                          src={img.url}
+                          alt={img.title}
+                          className="h-44 w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                        />
+                        <div className="truncate px-3 py-2 text-xs text-[#a1a1aa]">
+                          {img.title}
+                        </div>
+                      </a>
+                    ))
+                  ) : (
+                    <div className="col-span-3 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8 text-center text-sm text-[#8e8e95]">
+                      No uploaded or generated images yet. Try asking to create
+                      an image in Chat!
                     </div>
-                  ) : null}
+                  )}
                 </div>
               ) : (
-                <AiMessage
-                  key={msg.id}
-                  text={msg.text}
-                  isStreaming={streamingId === msg.id}
-                  ttsVoice={settings.ttsVoice}
-                  ttsModel={settings.ttsModel}
-                  ttsSpeed={settings.ttsSpeed}
-                  autoRead={settings.autoReadResponses}
-                  shouldAutoRead={
-                    settings.autoReadResponses && lastCompletedAiId === msg.id
-                  }
-                />
-              ),
-            )}
+                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-8 text-center text-sm text-[#8e8e95]">
+                  Video studio ready. Start a chat or Agent task to plan or
+                  script video workflows.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : isEmptyNewChat ? (
+          /* Centered Gemini-style New Chat / Agent Mode Hero Viewport with Smooth Blooming Animation */
+          <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 pb-12">
+            <div
+              key={newChatAnimKey}
+              className="flex w-full max-w-[680px] flex-col items-center"
+            >
+              <h1 className="hero-greeting-title animate-new-chat-title mb-6 text-center text-[27px] sm:text-[30px]">
+                {effectiveAgentMode
+                  ? 'Let’s cross something off your list'
+                  : userFirstName
+                    ? `Hi ${userFirstName}, what’s on your mind?`
+                    : 'Hi, what’s on your mind?'}
+              </h1>
 
-            {busy && !streamingId ? (
-              <div className="flex items-center justify-start py-1 text-[#e4e4e7]">
-                <LatticeLoader
-                  status="working"
-                  label="Thinking"
-                  doneLabel="Done in"
-                  errorLabel="Failed after"
-                  pattern="orbit"
-                  grid={3}
-                  shape="round"
-                  doneColor="#22c55e"
-                  errorColor="#ef4444"
-                  cellSize={6}
-                  gap={2}
-                  fontSize={14}
-                  step={90}
-                  idleOpacity={0.15}
-                  glow={false}
-                  glowColor=""
-                  showTimer
-                  elapsed={undefined}
-                  style={undefined}
+              <div className="animate-new-chat-bar w-full">
+                <PromptBar
+                  placeholder="Ask anything"
+                  defaultModel="void-combo"
+                  efforts={['Low', 'Medium', 'High', 'Extra', 'Max']}
+                  defaultEffort={selectedEffort}
+                  onEffortChange={(nextEffort: string) =>
+                    setSelectedEffort(nextEffort)
+                  }
+                  agentMode={effectiveAgentMode}
+                  connectedFolders={connectedFolders}
+                  onConnectFolder={handleConnectFolder}
+                  onDisconnectFolder={handleDisconnectFolder}
+                  busy={busy}
+                  onSend={send}
+                  onStop={handleStopGeneration}
+                  onAttach={() => pickFiles()}
+                  onDictate={() => ''}
+                  background={effectiveAgentMode ? '#1e1f24' : '#0c0e14'}
+                  color="#f5f5f5"
+                  menuBackground={effectiveAgentMode ? '#27282e' : '#1c1e26'}
+                  sparkColor="#d4d4d8"
+                  sparkBoost={1}
+                  width={680}
+                  radius={22}
+                  maxRows={5}
+                  morphDuration={240}
+                  squash={0.12}
+                  tilt={8}
+                  pressScale={0.96}
+                  sttModel={settings.sttModel}
                 />
               </div>
-            ) : null}
 
-            <div ref={bottomRef} />
+              <div className="animate-new-chat-suggestions mt-7 flex min-h-[124px] w-full max-w-[640px] flex-col items-start gap-1.5 pl-2">
+                {!effectiveAgentMode
+                  ? CHAT_SUGGESTIONS.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() =>
+                          void send(item.prompt, {
+                            attachments: [],
+                            model: {
+                              key: 'void-combo',
+                              name: 'VOID',
+                              shortName: 'VOID',
+                            },
+                            effort: selectedEffort,
+                            agentMode: false,
+                          })
+                        }
+                        className="flex items-center gap-3 rounded-xl px-3 py-2 text-left text-[13.5px] text-[#d4d4d8] transition-colors hover:bg-white/[0.05] hover:text-white"
+                      >
+                        <SuggestionIcon kind={item.icon} />
+                        <span>{item.label}</span>
+                      </button>
+                    ))
+                  : null}
+              </div>
+            </div>
           </div>
-        </div>
+        ) : (
+          /* Active Conversation Thread with Gemini-Style Scroll-to-Top Turn Positioning */
+          <>
+            <div
+              ref={scrollContainerRef}
+              className="relative z-10 flex-1 overflow-y-auto px-6 pt-6 pb-44"
+            >
+              <div
+                className={`mx-auto flex w-full max-w-[720px] flex-col ${
+                  settings.compactMode ? 'gap-4' : 'gap-6'
+                }`}
+              >
+                {messages.map((msg, idx) => {
+                  const isLatestUserMsg = idx === lastUserMessageIndex;
+                  const isInLatestTurn =
+                    lastUserMessageIndex >= 0 && idx >= lastUserMessageIndex;
 
-        {/* Bottom Floating PromptBar centered within the active main area */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center bg-gradient-to-t from-[#09090b] via-[#09090b]/95 to-transparent px-6 pt-4 pb-8">
-          <div className="pointer-events-auto w-full max-w-[760px]">
-            <PromptBar
-              placeholder="Ask anything"
-              defaultModel="void-combo"
-              efforts={['Low', 'Medium', 'High', 'Extra', 'Max']}
-              defaultEffort={selectedEffort}
-              onEffortChange={(nextEffort: string) =>
-                setSelectedEffort(nextEffort)
-              }
-              busy={busy}
-              onSend={send}
-              onStop={handleStopGeneration}
-              onAttach={() => pickFiles()}
-              onDictate={() => ''}
-              background="#27272a"
-              color="#f5f5f5"
-              menuBackground="#323236"
-              sparkColor="#b39dff"
-              sparkBoost={1}
-              width={760}
-              radius={16}
-              maxRows={5}
-              morphDuration={240}
-              squash={0.12}
-              tilt={8}
-              pressScale={0.96}
-              sttModel={settings.sttModel}
-            />
-          </div>
-        </div>
+                  if (msg.role === 'user') {
+                    return (
+                      <div
+                        key={msg.id}
+                        ref={isLatestUserMsg ? latestUserMsgRef : undefined}
+                        className="scroll-mt-6 flex flex-col items-end gap-2 pt-1"
+                      >
+                        {msg.attachments && msg.attachments.length > 0 ? (
+                          <div className="flex flex-wrap justify-end gap-2">
+                            {msg.attachments.map((item, i) => {
+                              const isObj = item && typeof item === 'object';
+                              const name = isObj ? item.name : String(item);
+                              const dataUrl = isObj ? item.dataUrl : undefined;
+                              if (dataUrl && dataUrl.startsWith('data:image/')) {
+                                return (
+                                  <div
+                                    key={`${name}-${i}`}
+                                    className="overflow-hidden rounded-2xl border border-white/[0.12] bg-[#18181b] shadow-md"
+                                  >
+                                    <img
+                                      src={dataUrl}
+                                      alt={name}
+                                      className="max-h-56 max-w-[260px] object-cover"
+                                    />
+                                  </div>
+                                );
+                              }
+                              return (
+                                <span
+                                  key={`${name}-${i}`}
+                                  className="rounded-lg bg-[#27272a] px-2.5 py-1 text-xs text-[#a1a1aa]"
+                                >
+                                  {name}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                        {msg.text ? (
+                          <UserMessageBubble
+                            text={msg.text}
+                            agentMode={msg.agentMode}
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={msg.id}
+                      className={
+                        isInLatestTurn && idx === messages.length - 1
+                          ? 'min-h-[calc(100vh-250px)] pb-8'
+                          : ''
+                      }
+                    >
+                      <AiMessage
+                        text={msg.text}
+                        isStreaming={streamingId === msg.id}
+                        ttsVoice={settings.ttsVoice}
+                        ttsModel={settings.ttsModel}
+                        ttsSpeed={settings.ttsSpeed}
+                        autoRead={settings.autoReadResponses}
+                        shouldAutoRead={
+                          settings.autoReadResponses &&
+                          lastCompletedAiId === msg.id
+                        }
+                        agentSteps={msg.agentSteps}
+                        agentTaskTitle={msg.agentTaskTitle}
+                        pendingCommand={msg.pendingCommand}
+                        onTerminalDecision={(action, finalCommand) => {
+                          if (activeChatId) {
+                            void handleTerminalDecision(
+                              activeChatId,
+                              msg.id,
+                              action,
+                              finalCommand,
+                            );
+                          }
+                        }}
+                      />
+                    </div>
+                  );
+                })}
+
+                {busy && !streamingId ? (
+                  <div className="min-h-[calc(100vh-250px)] flex items-start justify-start py-1 text-[#e4e4e7]">
+                    <LatticeLoader
+                      status="working"
+                      label={
+                        effectiveAgentMode ? 'Thinking it through' : 'Thinking'
+                      }
+                      doneLabel="Done in"
+                      errorLabel="Failed after"
+                      pattern="orbit"
+                      grid={3}
+                      shape="round"
+                      doneColor="#ffffff"
+                      errorColor="#ef4444"
+                      cellSize={6}
+                      gap={2}
+                      fontSize={14}
+                      step={90}
+                      idleOpacity={0.15}
+                      glow={false}
+                      glowColor=""
+                      showTimer
+                      elapsed={undefined}
+                      style={undefined}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Bottom Floating PromptBar when conversation is active */}
+            <div
+              className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center bg-gradient-to-t px-6 pt-4 pb-6 transition-colors duration-500 ${
+                effectiveAgentMode
+                  ? 'from-[#000000] via-[#000000]/95 to-transparent'
+                  : 'from-[#080a10] via-[#080a10]/95 to-transparent'
+              }`}
+            >
+              <div className="pointer-events-auto w-full max-w-[720px]">
+                <PromptBar
+                  placeholder="Ask anything"
+                  defaultModel="void-combo"
+                  efforts={['Low', 'Medium', 'High', 'Extra', 'Max']}
+                  defaultEffort={selectedEffort}
+                  onEffortChange={(nextEffort: string) =>
+                    setSelectedEffort(nextEffort)
+                  }
+                  agentMode={effectiveAgentMode}
+                  connectedFolders={connectedFolders}
+                  onConnectFolder={handleConnectFolder}
+                  onDisconnectFolder={handleDisconnectFolder}
+                  busy={busy}
+                  onSend={send}
+                  onStop={handleStopGeneration}
+                  onAttach={() => pickFiles()}
+                  onDictate={() => ''}
+                  background={effectiveAgentMode ? '#111114' : '#0c0e14'}
+                  color="#f5f5f5"
+                  menuBackground={effectiveAgentMode ? '#1c1c21' : '#1c1e26'}
+                  sparkColor="#e4e4e7"
+                  sparkBoost={1}
+                  width={720}
+                  radius={22}
+                  maxRows={5}
+                  morphDuration={240}
+                  squash={0.12}
+                  tilt={8}
+                  pressScale={0.96}
+                  sttModel={settings.sttModel}
+                />
+              </div>
+            </div>
+          </>
+        )}
       </main>
 
-      {/* Settings Modal (Voice Settings, AI Models & General Preferences) */}
+      {/* Settings Modal with Log out option under Clear all chats */}
       <SettingsModal
         open={settingsOpen}
         settings={settings}
+        canLogOut={hasAnyActiveSession}
+        accountLabel={
+          isAuthenticatedAccount
+            ? accountDisplayName
+            : guestProfile
+              ? `Guest (${guestProfile.name})`
+              : undefined
+        }
         onUpdateSettings={setSettings}
         onClearAllChats={handleClearAllChats}
+        onLogOut={() => void handleFullLogOut()}
         onClose={() => setSettingsOpen(false)}
       />
       <AuthModal
         open={authOpen}
         user={authUser}
+        guestProfile={guestProfile}
+        onUpdateGuestProfile={(profile) => setGuestProfile(profile)}
         onClose={() => setAuthOpen(false)}
-        onSignOut={signOutCurrentSession}
+        onSignOut={handleFullLogOut}
       />
     </div>
   );

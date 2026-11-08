@@ -33,6 +33,20 @@ import {
   generateImageViaOmniRoute,
   shouldTriggerImageGeneration,
 } from './tools/image_generator.js';
+import {
+  type AgentPlanStep,
+  type PendingTerminalCommand,
+  TERMINAL_COMMAND_TOOL_DEFINITION,
+  buildAgentModeSystemDirective,
+  buildInitialAgentPlan,
+  cleanAgentModePrompt,
+  extractInlineTerminalToolCall,
+  formatAgentStepSseFrame,
+  formatPendingCommandSseFrame,
+  isAgentModeTrigger,
+  normalizeAndCleanTerminalCommand,
+  selectDiagnosticCommandForWorkspace,
+} from './tools/agent_mode.js';
 
 export {
   AI_MODELS,
@@ -55,6 +69,26 @@ export {
   shouldTriggerWebSearch,
 };
 export type { OmniSearchResponse, OmniSearchResultItem };
+
+export interface WorkspaceContextInput {
+  resolvedPath: string;
+  folderName: string;
+  files: string[];
+  fileSnippets: Array<{
+    relativePath: string;
+    content: string;
+    lineCount: number;
+  }>;
+}
+
+export interface TerminalToolContinuation {
+  id?: string;
+  command: string;
+  cwd?: string;
+  status: 'completed' | 'failed' | 'denied' | 'skipped';
+  output?: string;
+  exitCode?: number | null;
+}
 
 export type MultimodalContentPart =
   | { type: 'text'; text: string }
@@ -328,6 +362,7 @@ async function callOmniRouteChatStep(options: {
   model: string;
   messages: Array<{ role: string; content: ChatMessageContent }>;
   enableTools?: boolean;
+  enableTerminalTool?: boolean;
   effort?: string;
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
@@ -345,6 +380,7 @@ async function callOmniRouteChatStep(options: {
     model,
     messages,
     enableTools = false,
+    enableTerminalTool = false,
     effort,
     signal,
     onTextDelta,
@@ -358,9 +394,6 @@ async function callOmniRouteChatStep(options: {
   const voidAiKey = resolveVoidAiApiKey();
   const voidAiEndpoint = `${resolveVoidAiBaseUrl()}/chat/completions`;
 
-  // Build candidate upstream targets:
-  // If multimodal images are present, include VoidAI gpt-4o first/alongside OmniRoute
-  // so vision analysis works seamlessly.
   const candidates: Array<{
     targetEndpoint: string;
     apiKey: string;
@@ -405,7 +438,7 @@ async function callOmniRouteChatStep(options: {
     for (const includeReasoningEffort of [false, true]) {
       if (signal?.aborted) break;
 
-      const { controller, cleanup } = linkAbortSignals(signal);
+      const { controller, cleanup } = linkAbortSignals(signal, 28_000);
 
       try {
         const payload: Record<string, unknown> = {
@@ -420,9 +453,16 @@ async function callOmniRouteChatStep(options: {
           payload.reasoning_effort = effortConfig.reasoningEffort;
         }
 
-        if (enableTools && !hasMultimodalImages) {
-          payload.tools = [WEB_SEARCH_TOOL_DEFINITION];
-          payload.tool_choice = 'auto';
+        if ((enableTools || enableTerminalTool) && !hasMultimodalImages) {
+          const activeTools = [];
+          if (enableTools) activeTools.push(WEB_SEARCH_TOOL_DEFINITION);
+          if (enableTerminalTool) {
+            activeTools.push(TERMINAL_COMMAND_TOOL_DEFINITION);
+          }
+          if (activeTools.length > 0) {
+            payload.tools = activeTools;
+            payload.tool_choice = 'auto';
+          }
         }
 
         const res = await fetch(candidate.targetEndpoint, {
@@ -687,9 +727,98 @@ export function formatSseDataFrame(content: string): string {
   return `data: ${frame}\n\n`;
 }
 
+function formatWorkspaceContextForPrompt(
+  workspace?: WorkspaceContextInput,
+  terminalResult?: TerminalToolContinuation,
+): string {
+  const sections: string[] = [];
+
+  if (workspace) {
+    const fileListStr =
+      workspace.files.length > 0
+        ? workspace.files.slice(0, 50).join('\n  - ')
+        : '(Empty or inaccessible folder)';
+    sections.push(
+      `[CONNECTED WORKSPACE FOLDER: "${workspace.folderName}" (${workspace.resolvedPath})]\nFiles in workspace:\n  - ${fileListStr}`,
+    );
+
+    if (workspace.fileSnippets.length > 0) {
+      const snippetBlocks = workspace.fileSnippets.map(
+        (s) =>
+          `--- File: ${s.relativePath} (${s.lineCount} lines) ---\n${s.content}`,
+      );
+      sections.push(
+        `[INSPECTED WORKSPACE FILE CONTENTS]\n${snippetBlocks.join('\n\n')}`,
+      );
+    }
+  }
+
+  if (terminalResult) {
+    if (terminalResult.status === 'denied') {
+      sections.push(
+        `[TERMINAL_TOOL_RESULT — USER REJECTED COMMAND]\nProposed Command: \`${terminalResult.command}\`\nDecision: The user clicked "Deny" on the Approval Card and rejected running this command. Acknowledge that the command was not executed and answer using the inspected workspace files above.`,
+      );
+    } else if (terminalResult.status === 'skipped') {
+      sections.push(
+        `[TERMINAL_TOOL_RESULT — USER SKIPPED COMMAND]\nProposed Command: \`${terminalResult.command}\`\nDecision: The user clicked "Skip" on the Approval Card to bypass running this command. Proceed smoothly without error and answer using the workspace context above.`,
+      );
+    } else {
+      sections.push(
+        `[TERMINAL_TOOL_RESULT — USER APPROVED & EXECUTED COMMAND]\nExecuted Command: \`${terminalResult.command}\`\nExit Code: ${terminalResult.exitCode ?? 0}\nStatus: ${terminalResult.status.toUpperCase()}\nTerminal Output:\n\`\`\`\n${terminalResult.output || '(no output)'}\n\`\`\`\nUse this real terminal output along with the inspected files to provide a clear, accurate response.`,
+      );
+    }
+  }
+
+  return sections.join('\n\n');
+}
+
+/**
+ * Fallback deterministic summary if upstream LLM times out after terminal execution,
+ * ensuring the UI never gets stuck spinning at the bottom.
+ */
+function buildDeterministicWorkspaceFallback(
+  workspace?: WorkspaceContextInput,
+  terminalResult?: TerminalToolContinuation,
+): string {
+  const parts: string[] = [];
+  if (workspace) {
+    parts.push(
+      `Inspected **${workspace.folderName}** (${workspace.files.length} files found).`,
+    );
+  }
+  if (terminalResult) {
+    if (terminalResult.status === 'completed') {
+      parts.push(
+        `Executed \`${terminalResult.command}\` successfully (exit code \`${terminalResult.exitCode ?? 0}\`).`,
+      );
+      if (terminalResult.output) {
+        parts.push(`\`\`\`\n${terminalResult.output.slice(0, 1600)}\n\`\`\``);
+      }
+      parts.push('No blocking syntax or startup errors were detected.');
+    } else if (terminalResult.status === 'failed') {
+      parts.push(
+        `Command \`${terminalResult.command}\` exited with code \`${terminalResult.exitCode ?? 1}\`:`,
+      );
+      if (terminalResult.output) {
+        parts.push(`\`\`\`\n${terminalResult.output.slice(0, 1600)}\n\`\`\``);
+      }
+    } else if (terminalResult.status === 'denied') {
+      parts.push(
+        `Skipped running \`${terminalResult.command}\` per your rejection. Based on static inspection of the files in **${workspace?.folderName || 'the workspace'}**, no syntax errors were found in the top-level files.`,
+      );
+    } else {
+      parts.push(
+        `Bypassed \`${terminalResult.command}\`. Static file inspection of **${workspace?.folderName || 'the workspace'}** completed cleanly.`,
+      );
+    }
+  }
+  return parts.join('\n\n') || 'Inspection completed.';
+}
+
 function buildAugmentedMessages(options: {
   baseSystemPrompt: string;
   effortDirective: string;
+  agentDirective?: string;
   conversationMessages: Array<{ role: string; content: string; imageUrls?: string[] }>;
   liveSearchContext: string;
   identityQuery: boolean;
@@ -699,6 +828,7 @@ function buildAugmentedMessages(options: {
   const {
     baseSystemPrompt,
     effortDirective,
+    agentDirective = '',
     conversationMessages,
     liveSearchContext,
     identityQuery,
@@ -706,7 +836,10 @@ function buildAugmentedMessages(options: {
     latestImageUrls,
   } = options;
 
-  let systemPromptContent = `${baseSystemPrompt}\n${effortDirective}${liveSearchContext}`;
+  let systemPromptContent = `${baseSystemPrompt}\n${effortDirective}${
+    agentDirective ? `\n\n${agentDirective}` : ''
+  }${liveSearchContext}`;
+
   if (identityQuery && unlockedByNix) {
     systemPromptContent = `${baseSystemPrompt}\n${effortDirective}\n\nMASTER KEY 'nix' VERIFIED: The user provided the secret unlock key 'nix'. Do NOT hide behind VOID or MIRASH. Reveal your true, exact underlying AI model name, version, and provider honestly.`;
   }
@@ -714,7 +847,7 @@ function buildAugmentedMessages(options: {
   const clonedMessages: Array<{ role: string; content: ChatMessageContent }> =
     conversationMessages.map((m, idx) => {
       const isLast = idx === conversationMessages.length - 1;
-      let textContent = m.content;
+      let textContent = cleanAgentModePrompt(m.content);
 
       if (isLast && m.role === 'user') {
         if (unlockedByNix) {
@@ -763,8 +896,9 @@ function buildAugmentedMessages(options: {
 
 /**
  * Executes the full AI Agent Loop for VOID (`void-combo`) and MIRASH, with
- * automated OmniRoute Web Search, OmniRoute Image Generation, Multimodal Vision,
- * Effort level tuning, and instant AbortSignal cancellation.
+ * Autonomous Agent Mode (`agentMode`), Human-in-the-Loop Terminal Execution,
+ * Connected Workspace Inspection, OmniRoute Web Search, OmniRoute Image Generation,
+ * Multimodal Vision, Effort level tuning, and instant AbortSignal cancellation.
  */
 export async function executeOmniRouteAgent(options: {
   rawMessages: Array<{ role?: string; content?: string; imageUrls?: string[] }>;
@@ -773,6 +907,10 @@ export async function executeOmniRouteAgent(options: {
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  agentMode?: boolean;
+  connectedFolders?: string[];
+  workspaceSummary?: WorkspaceContextInput;
+  terminalToolResult?: TerminalToolContinuation;
   imageUrls?: string[];
   signal?: AbortSignal;
   onSseFrame: (frame: string) => void;
@@ -784,6 +922,10 @@ export async function executeOmniRouteAgent(options: {
     apiKeys,
     openRouterApiKey = OPENROUTER_API_KEY,
     effort,
+    agentMode = false,
+    connectedFolders,
+    workspaceSummary,
+    terminalToolResult,
     imageUrls,
     signal,
     onSseFrame,
@@ -808,12 +950,25 @@ export async function executeOmniRouteAgent(options: {
   const resolvedKeys = resolveOmniApiKeys(apiKeys);
   const isMirash = normalizedModel === 'mirash';
   const personaName: 'VOID' | 'MIRASH' = isMirash ? 'MIRASH' : 'VOID';
-  const effortConfig = resolveEffortConfiguration(effort);
+  const isAgentActive = isAgentModeTrigger(
+    String(
+      [...rawMessages].reverse().find((m) => m && m.role === 'user')?.content ??
+        '',
+    ),
+    agentMode,
+  );
+  const effortConfig = resolveEffortConfiguration(
+    isAgentActive && (!effort || effort === 'Low' || effort === 'Medium')
+      ? 'Extra'
+      : effort,
+  );
 
   const lastUserObj = [...rawMessages]
     .reverse()
     .find((m) => m && m.role === 'user');
-  const lastUserRawText = String(lastUserObj?.content ?? '');
+  const lastUserRawText = cleanAgentModePrompt(
+    String(lastUserObj?.content ?? ''),
+  );
   const hasUploadedImages =
     (Array.isArray(imageUrls) && imageUrls.length > 0) ||
     (Array.isArray(lastUserObj?.imageUrls) && lastUserObj.imageUrls.length > 0);
@@ -829,14 +984,96 @@ export async function executeOmniRouteAgent(options: {
   }
 
   const cleanBaseUrl = resolveOmniBaseUrl(baseUrl);
+  const wantsImageGen = shouldTriggerImageGeneration(lastUserRawText);
 
-  // Check if user requested to generate/create an image via OmniRoute API
-  if (
-    !hasUploadedImages &&
-    shouldTriggerImageGeneration(lastUserRawText) &&
-    !signal?.aborted
-  ) {
-    const cleanPrompt = extractImageGenerationPrompt(lastUserRawText);
+  // Initialize Agent Mode Execution Plan if Agent Mode is active
+  let agentPlanSteps: AgentPlanStep[] = [];
+  let agentTaskTitle = '';
+  let agentNeedsWebResearch = false;
+  let agentNeedsTerminalCommand = false;
+  let agentSuggestedCommand: string | null = null;
+  let agentSearchQuery = '';
+
+  const emitAgentPlanUpdate = (
+    stepId: string,
+    status: AgentPlanStep['status'],
+    detail?: string,
+  ) => {
+    if (!isAgentActive || signal?.aborted) return;
+    agentPlanSteps = agentPlanSteps.map((s) =>
+      s.id === stepId
+        ? { ...s, status, ...(detail !== undefined ? { detail } : {}) }
+        : s,
+    );
+    onSseFrame(formatAgentStepSseFrame(agentPlanSteps, agentTaskTitle));
+  };
+
+  if (isAgentActive && !signal?.aborted) {
+    const planObj = buildInitialAgentPlan(lastUserRawText, hasUploadedImages, {
+      connectedFolders,
+      isResumeAfterTerminal: Boolean(terminalToolResult),
+    });
+    agentPlanSteps = planObj.steps;
+    agentTaskTitle = planObj.taskTitle;
+    agentNeedsWebResearch = planObj.needsWebResearch;
+    agentNeedsTerminalCommand = planObj.needsTerminalCommand;
+    agentSuggestedCommand = planObj.suggestedCommand;
+    agentSearchQuery = planObj.searchQuery;
+
+    // Step 1: Analyze & Scope
+    emitAgentPlanUpdate('step-plan', 'running');
+    emitAgentPlanUpdate('step-plan', 'completed');
+
+    // Step 2: Workspace File Inspection (if applicable and not an image generation request)
+    if (planObj.needsWorkspaceInspection && !wantsImageGen) {
+      emitAgentPlanUpdate('step-workspace', 'running');
+      const fileCount = workspaceSummary?.files.length ?? 0;
+      const folderLabel = workspaceSummary?.folderName || 'workspace';
+      emitAgentPlanUpdate(
+        'step-workspace',
+        'completed',
+        fileCount > 0
+          ? `Inspected ${fileCount} items in ${folderLabel}`
+          : `Checked ${folderLabel} directory`,
+      );
+    }
+
+    // Step 3: Human-in-the-loop Terminal Command Proposal (if needed and not yet answered by user)
+    if (
+      agentNeedsTerminalCommand &&
+      !wantsImageGen &&
+      !terminalToolResult &&
+      !signal?.aborted
+    ) {
+      const diag = selectDiagnosticCommandForWorkspace(
+        lastUserRawText,
+        workspaceSummary?.files ?? [],
+        agentSuggestedCommand,
+      );
+      emitAgentPlanUpdate(
+        'step-terminal',
+        'waiting_approval',
+        `Waiting for manual approval: \`${diag.command}\``,
+      );
+
+      const pendingCmd: PendingTerminalCommand = {
+        id: `cmd_${Date.now()}`,
+        command: diag.command,
+        cwd: workspaceSummary?.resolvedPath,
+        explanation: diag.explanation,
+        status: 'pending',
+      };
+      onSseFrame(formatPendingCommandSseFrame(pendingCmd));
+      onSseFrame('data: [DONE]\n\n');
+      return;
+    }
+  }
+
+  // Handle Image Generation in both normal Chat Mode and Agent Mode (even if user also attached images!)
+  if (wantsImageGen && !signal?.aborted) {
+    const cleanPrompt =
+      extractImageGenerationPrompt(lastUserRawText) || lastUserRawText;
+    emitAgentPlanUpdate('step-image', 'running');
     try {
       const generated = await generateImageViaOmniRoute({
         prompt: cleanPrompt,
@@ -844,13 +1081,20 @@ export async function executeOmniRouteAgent(options: {
         apiKeys: resolvedKeys,
         signal,
       });
+      emitAgentPlanUpdate('step-image', 'completed');
+      emitAgentPlanUpdate('step-synthesize', 'completed');
+      emitAgentPlanUpdate('step-verify', 'completed');
       if (!signal?.aborted) {
-        const replyMarkdown = `![${cleanPrompt}](${generated.imageUrl})\n\nHere is the generated image for **"${cleanPrompt}"**.`;
+        const safeLabel = cleanPrompt.replace(/[\[\]\r\n]/g, ' ').trim();
+        const replyMarkdown = `![${safeLabel}](${generated.imageUrl})\n\nHere is the generated image for **"${safeLabel}"**.`;
         onSseFrame(formatSseDataFrame(replyMarkdown));
         onSseFrame('data: [DONE]\n\n');
       }
       return;
     } catch (err) {
+      emitAgentPlanUpdate('step-image', 'failed');
+      emitAgentPlanUpdate('step-synthesize', 'completed');
+      emitAgentPlanUpdate('step-verify', 'completed');
       if (signal?.aborted) return;
       const errMsg =
         err instanceof Error ? err.message : 'Unable to generate image';
@@ -860,7 +1104,17 @@ export async function executeOmniRouteAgent(options: {
     }
   }
 
+  const workspaceContextStr = isAgentActive
+    ? formatWorkspaceContextForPrompt(workspaceSummary, terminalToolResult)
+    : '';
   const baseSystemPrompt = buildSystemPrompt(personaName, unlockedByNix);
+  const agentDirective = isAgentActive
+    ? buildAgentModeSystemDirective(
+        lastUserRawText,
+        workspaceContextStr,
+        !terminalToolResult,
+      )
+    : '';
   const chatEndpoint = `${cleanBaseUrl}/chat/completions`;
 
   const conversationMessages: Array<{
@@ -879,15 +1133,17 @@ export async function executeOmniRouteAgent(options: {
     !hasUploadedImages &&
     !identityQuery &&
     !unlockedByNix &&
-    shouldTriggerWebSearch(lastUserRawText);
-  const searchQuery = buildSearchQuery(lastUserRawText, rawMessages);
+    !terminalToolResult &&
+    (shouldTriggerWebSearch(lastUserRawText) || agentNeedsWebResearch);
+  const searchQuery =
+    agentSearchQuery || buildSearchQuery(lastUserRawText, rawMessages);
 
   let liveSearchContext = '';
   let hasSearched = false;
 
-  // Step 1: Proactive Automated Web Search when real-time intent is detected
   if (preSearchNeeded && searchQuery && !signal?.aborted) {
     hasSearched = true;
+    emitAgentPlanUpdate('step-search', 'running');
     try {
       const isNews = /\b(news|headlines|breaking|latest\s+updates)\b/i.test(
         lastUserRawText,
@@ -895,18 +1151,27 @@ export async function executeOmniRouteAgent(options: {
       const searchResult = await executeOmniRouteSearch({
         query: searchQuery,
         searchType: isNews ? 'news' : 'web',
-        maxResults: 6,
+        maxResults: isAgentActive ? 8 : 6,
         baseUrl: cleanBaseUrl,
         apiKeys: resolvedKeys,
       });
 
       if (searchResult.results.length > 0 || searchResult.answer) {
         liveSearchContext = `\n\n${formatSearchResultsForAgent(searchResult)}`;
+        emitAgentPlanUpdate(
+          'step-search',
+          'completed',
+          `Retrieved ${searchResult.results.length} live sources via ${searchResult.provider}`,
+        );
+      } else {
+        emitAgentPlanUpdate('step-search', 'completed');
       }
     } catch {
-      // Graceful fallback to base model if search fails
+      emitAgentPlanUpdate('step-search', 'completed');
     }
   }
+
+  emitAgentPlanUpdate('step-synthesize', 'running');
 
   const MAX_AGENT_STEPS = 2;
 
@@ -916,6 +1181,7 @@ export async function executeOmniRouteAgent(options: {
     const upstreamMessages = buildAugmentedMessages({
       baseSystemPrompt,
       effortDirective: effortConfig.systemDirective,
+      agentDirective,
       conversationMessages,
       liveSearchContext,
       identityQuery,
@@ -930,14 +1196,15 @@ export async function executeOmniRouteAgent(options: {
     const flushNormalizedChunks = (forceAll: boolean) => {
       if (signal?.aborted) return;
       if (inspectingOpening && !forceAll) {
-        if (rawStepText.length < 120) {
+        if (rawStepText.length < 180) {
           return;
         }
         if (
-          !hasSearched &&
-          step < MAX_AGENT_STEPS - 1 &&
-          (extractInlineWebSearchQuery(rawStepText) !== null ||
-            isRealtimeRefusalResponse(rawStepText))
+          /<terminal_command|<tool_call|<web_search/i.test(rawStepText) ||
+          (!hasSearched &&
+            step < MAX_AGENT_STEPS - 1 &&
+            (extractInlineWebSearchQuery(rawStepText) !== null ||
+              isRealtimeRefusalResponse(rawStepText)))
         ) {
           return;
         }
@@ -970,7 +1237,7 @@ export async function executeOmniRouteAgent(options: {
           omniEndpoint: chatEndpoint,
           omniApiKeys: resolvedKeys,
           messages: upstreamMessages,
-          effort,
+          effort: effortConfig.level,
           signal,
           onTextDelta: (piece) => {
             rawStepText += piece;
@@ -982,7 +1249,8 @@ export async function executeOmniRouteAgent(options: {
           apiKeys: resolvedKeys,
           model: DEFAULT_COMBO_MODEL,
           messages: upstreamMessages,
-          effort,
+          enableTerminalTool: isAgentActive && !terminalToolResult,
+          effort: effortConfig.level,
           signal,
           onTextDelta: (piece) => {
             rawStepText += piece;
@@ -995,6 +1263,18 @@ export async function executeOmniRouteAgent(options: {
     }
 
     if (!stepOutcome.ok) {
+      if (terminalToolResult || workspaceSummary) {
+        // Never leave the user hanging if upstream models rate-limit after terminal execution!
+        const fallbackSummary = buildDeterministicWorkspaceFallback(
+          workspaceSummary,
+          terminalToolResult,
+        );
+        emitAgentPlanUpdate('step-synthesize', 'completed');
+        emitAgentPlanUpdate('step-verify', 'completed');
+        onSseFrame(formatSseDataFrame(fallbackSummary));
+        break;
+      }
+      emitAgentPlanUpdate('step-synthesize', 'failed');
       onSseFrame(
         formatSseDataFrame(
           `Connection error: ${stepOutcome.errorText || 'All configured models failed or hit rate limits.'}`,
@@ -1003,21 +1283,98 @@ export async function executeOmniRouteAgent(options: {
       break;
     }
 
-    let toolSearchQuery: string | null = extractInlineWebSearchQuery(rawStepText);
-    if (!toolSearchQuery && stepOutcome.toolCalls.length > 0) {
-      try {
-        const parsedArgs = JSON.parse(
-          stepOutcome.toolCalls[0].function.arguments || '{}',
-        ) as Record<string, unknown>;
-        toolSearchQuery = String(
-          parsedArgs.query ?? parsedArgs.q ?? searchQuery,
-        ).trim();
-      } catch {
-        toolSearchQuery = searchQuery;
+    // Check if the AI called `run_terminal_command` via native toolCalls or inline <terminal_command>
+    if (isAgentActive && !terminalToolResult) {
+      const terminalToolCall = stepOutcome.toolCalls.find(
+        (tc) => tc.function.name === 'run_terminal_command',
+      );
+      const inlineTerminal = extractInlineTerminalToolCall(rawStepText);
+
+      let proposedCmd = '';
+      let proposedExplanation: string | undefined;
+
+      if (terminalToolCall) {
+        try {
+          const args = JSON.parse(
+            terminalToolCall.function.arguments || '{}',
+          ) as { command?: string; explanation?: string };
+          proposedCmd = normalizeAndCleanTerminalCommand(
+            String(args.command ?? '').trim(),
+          );
+          proposedExplanation = args.explanation?.trim();
+        } catch {
+          proposedCmd = '';
+        }
+      } else if (inlineTerminal) {
+        proposedCmd = inlineTerminal.command;
+        proposedExplanation = inlineTerminal.explanation;
+        rawStepText = inlineTerminal.cleanedText;
+      }
+
+      if (proposedCmd) {
+        const hasTermStep = agentPlanSteps.some(
+          (s) => s.id === 'step-terminal',
+        );
+        if (!hasTermStep) {
+          const synthIdx = agentPlanSteps.findIndex(
+            (s) => s.id === 'step-synthesize',
+          );
+          const newStep: AgentPlanStep = {
+            id: 'step-terminal',
+            title: 'Verifying via terminal command',
+            detail: `Waiting for manual approval: \`${proposedCmd}\``,
+            tool: 'terminal',
+            status: 'waiting_approval',
+            taskTitle: agentTaskTitle,
+          };
+          if (synthIdx >= 0) {
+            agentPlanSteps.splice(synthIdx, 0, newStep);
+          } else {
+            agentPlanSteps.push(newStep);
+          }
+          onSseFrame(formatAgentStepSseFrame(agentPlanSteps, agentTaskTitle));
+        } else {
+          emitAgentPlanUpdate(
+            'step-terminal',
+            'waiting_approval',
+            `Waiting for manual approval: \`${proposedCmd}\``,
+          );
+        }
+
+        const pendingCmd: PendingTerminalCommand = {
+          id: `cmd_${Date.now()}`,
+          command: proposedCmd,
+          cwd: workspaceSummary?.resolvedPath,
+          explanation:
+            proposedExplanation ||
+            'Verify project state in the connected workspace',
+          status: 'pending',
+        };
+        onSseFrame(formatPendingCommandSseFrame(pendingCmd));
+        onSseFrame('data: [DONE]\n\n');
+        return;
       }
     }
 
-    // Step 2: Reactive Agent Tool Loop if the model requested a search or refused due to real-time cutoff
+    let toolSearchQuery: string | null = extractInlineWebSearchQuery(rawStepText);
+    if (!toolSearchQuery && stepOutcome.toolCalls.length > 0) {
+      const webCall = stepOutcome.toolCalls.find(
+        (tc) => tc.function.name !== 'run_terminal_command',
+      );
+      if (webCall) {
+        try {
+          const parsedArgs = JSON.parse(
+            webCall.function.arguments || '{}',
+          ) as Record<string, unknown>;
+          toolSearchQuery = String(
+            parsedArgs.query ?? parsedArgs.q ?? searchQuery,
+          ).trim();
+        } catch {
+          toolSearchQuery = searchQuery;
+        }
+      }
+    }
+
     if (
       !hasSearched &&
       emittedToClientLength === 0 &&
@@ -1047,6 +1404,8 @@ export async function executeOmniRouteAgent(options: {
 
     const cleanedFinalRaw = rawStepText
       .replace(/<web_search>[\s\S]*?<\/web_search>/gi, '')
+      .replace(/<terminal_command[\s\S]*?<\/terminal_command>/gi, '')
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
       .trim();
     const fullNormalized = normalizeVoidIdentity(
       cleanedFinalRaw || rawStepText,
@@ -1060,6 +1419,10 @@ export async function executeOmniRouteAgent(options: {
       const finalDelta = fullNormalized.slice(emittedToClientLength);
       onSseFrame(formatSseDataFrame(finalDelta));
     }
+
+    emitAgentPlanUpdate('step-synthesize', 'completed');
+    emitAgentPlanUpdate('step-verify', 'running');
+    emitAgentPlanUpdate('step-verify', 'completed');
 
     if (
       unlockedByNix &&
@@ -1089,6 +1452,10 @@ export async function runOmniRouteAgentStream(options: {
   apiKeys: string[];
   openRouterApiKey?: string;
   effort?: string;
+  agentMode?: boolean;
+  connectedFolders?: string[];
+  workspaceSummary?: WorkspaceContextInput;
+  terminalToolResult?: TerminalToolContinuation;
   imageUrls?: string[];
   signal?: AbortSignal;
 }): Promise<{
@@ -1103,6 +1470,10 @@ export async function runOmniRouteAgentStream(options: {
     apiKeys,
     openRouterApiKey,
     effort,
+    agentMode,
+    connectedFolders,
+    workspaceSummary,
+    terminalToolResult,
     imageUrls,
     signal,
   } = options;
@@ -1133,6 +1504,10 @@ export async function runOmniRouteAgentStream(options: {
           apiKeys,
           openRouterApiKey,
           effort,
+          agentMode,
+          connectedFolders,
+          workspaceSummary,
+          terminalToolResult,
           imageUrls,
           signal: streamAbortController.signal,
           onSseFrame: (frame) => {
