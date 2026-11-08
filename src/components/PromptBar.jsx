@@ -30,7 +30,7 @@ const EDGE = 11;
 
 // Microphone auto-off silence rules:
 // - 6 seconds (6000ms) if mic is turned on and no word has been spoken yet
-// - 20 seconds (20000ms) after the user speaks at least one word (so 5s/10s thinking pauses never cut off)
+// - 20 seconds (20000ms) after the user speaks at least one word
 const INITIAL_NO_SPEECH_TIMEOUT_MS = 6000;
 const POST_SPEECH_SILENCE_TIMEOUT_MS = 20000;
 
@@ -361,11 +361,18 @@ export default function PromptBar({
   const lastOpen = useRef(null);
   const dictation = useRef(0);
   const recognitionRef = useRef(null);
+  const browserSpeechBrokenRef = useRef(false);
+  const browserSpeechProducedResultRef = useRef(false);
   const silenceTimerRef = useRef(null);
   const hasSpokenWordInSessionRef = useRef(false);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const audioMonitorCtxRef = useRef(null);
+  const audioMonitorRafRef = useRef(0);
+  const hasVoiceInChunkRef = useRef(false);
+  const lastVoiceActivityTimeRef = useRef(0);
+  const isFlushingChunkRef = useRef(false);
   const baseDraftRef = useRef('');
   const committedSegmentsRef = useRef([]);
   const currentInterimDisplayRef = useRef('');
@@ -561,8 +568,109 @@ export default function PromptBar({
     [isDefaultCodingStt, sttModel, syncDraftFromSpeechState]
   );
 
+  const stopAudioMonitor = useCallback(() => {
+    if (audioMonitorRafRef.current) {
+      cancelAnimationFrame(audioMonitorRafRef.current);
+      audioMonitorRafRef.current = 0;
+    }
+    if (audioMonitorCtxRef.current) {
+      try {
+        void audioMonitorCtxRef.current.close();
+      } catch {}
+      audioMonitorCtxRef.current = null;
+    }
+  }, []);
+
+  const transcribeRecordedBlob = useCallback(
+    (blob, cleanMime) => {
+      if (!blob || blob.size < 300) return Promise.resolve();
+
+      const fallbackHint = collapseRepeatedSpeech(
+        committedSegmentsRef.current.filter(Boolean).join(' ')
+      );
+      const apiLang = isDefaultCodingStt
+        ? speechLang === 'ml-IN'
+          ? 'ml'
+          : speechLang === 'hi-IN'
+            ? 'hi'
+            : 'en'
+        : 'auto';
+
+      const reqPromise = blobToBase64(blob)
+        .then(audioBase64 =>
+          authenticatedFetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioBase64,
+              mimeType: cleanMime,
+              model: isOpenAiAudioStt ? sttModel : 'gpt-4o-transcribe',
+              lang: apiLang,
+              hint: fallbackHint
+            })
+          })
+        )
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          const transcribed = cleanSpeechTranscript(data?.text);
+          if (transcribed && !browserSpeechProducedResultRef.current) {
+            committedSegmentsRef.current.push(transcribed);
+            currentInterimDisplayRef.current = '';
+            syncDraftFromSpeechState();
+          }
+        })
+        .catch(() => {});
+
+      pendingConversionsRef.current.push(reqPromise);
+      return reqPromise;
+    },
+    [isDefaultCodingStt, isOpenAiAudioStt, speechLang, sttModel, syncDraftFromSpeechState]
+  );
+
+  const flushIntermediateRecorderChunk = useCallback(() => {
+    if (isFlushingChunkRef.current || !shouldKeepListeningRef.current) return;
+    const recorder = mediaRecorderRef.current;
+    const stream = mediaStreamRef.current;
+    if (!recorder || !stream || recorder.state === 'inactive') return;
+
+    isFlushingChunkRef.current = true;
+    hasVoiceInChunkRef.current = false;
+    const cleanMime = (recorder.mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+
+    recorder.onstop = () => {
+      const chunks = [...audioChunksRef.current];
+      audioChunksRef.current = [];
+      isFlushingChunkRef.current = false;
+
+      if (chunks.length > 0 && !browserSpeechProducedResultRef.current) {
+        const blob = new Blob(chunks, { type: cleanMime });
+        void transcribeRecordedBlob(blob, cleanMime);
+      }
+
+      if (shouldKeepListeningRef.current && mediaStreamRef.current) {
+        try {
+          const nextRecorder = new MediaRecorder(mediaStreamRef.current);
+          nextRecorder.ondataavailable = e => {
+            if (e.data && e.data.size > 0) {
+              audioChunksRef.current.push(e.data);
+            }
+          };
+          nextRecorder.start(250);
+          mediaRecorderRef.current = nextRecorder;
+        } catch {}
+      }
+    };
+
+    try {
+      recorder.stop();
+    } catch {
+      isFlushingChunkRef.current = false;
+    }
+  }, [transcribeRecordedBlob]);
+
   const stopMediaRecorder = useCallback(
     flushAudio => {
+      stopAudioMonitor();
       const recorder = mediaRecorderRef.current;
       mediaRecorderRef.current = null;
       const stream = mediaStreamRef.current;
@@ -585,52 +693,12 @@ export default function PromptBar({
           }
           const chunks = [...audioChunksRef.current];
           audioChunksRef.current = [];
-          if (!flushAudio || chunks.length === 0) {
+          if (!flushAudio || chunks.length === 0 || browserSpeechProducedResultRef.current) {
             resolve();
             return;
           }
           const blob = new Blob(chunks, { type: cleanMime });
-          if (blob.size < 200) {
-            resolve();
-            return;
-          }
-
-          const fallbackHint = collapseRepeatedSpeech(
-            committedSegmentsRef.current.filter(Boolean).join(' ')
-          );
-          const apiLang = isDefaultCodingStt
-            ? speechLang === 'ml-IN'
-              ? 'ml'
-              : speechLang === 'hi-IN'
-                ? 'hi'
-                : 'en'
-            : 'auto';
-
-          blobToBase64(blob)
-            .then(audioBase64 =>
-              authenticatedFetch('/api/transcribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  audioBase64,
-                  mimeType: cleanMime,
-                  model: isOpenAiAudioStt ? sttModel : 'gpt-4o-transcribe',
-                  lang: apiLang,
-                  hint: fallbackHint
-                })
-              })
-            )
-            .then(res => (res.ok ? res.json() : null))
-            .then(data => {
-              const transcribed = cleanSpeechTranscript(data?.text);
-              if (transcribed && committedSegmentsRef.current.length === 0) {
-                committedSegmentsRef.current = [transcribed];
-                currentInterimDisplayRef.current = '';
-                syncDraftFromSpeechState();
-              }
-            })
-            .catch(() => {})
-            .finally(() => resolve());
+          transcribeRecordedBlob(blob, cleanMime).finally(() => resolve());
         };
 
         if (recorder.state !== 'inactive') {
@@ -648,7 +716,7 @@ export default function PromptBar({
       pendingConversionsRef.current.push(stopPromise);
       return stopPromise;
     },
-    [isDefaultCodingStt, isOpenAiAudioStt, speechLang, sttModel, syncDraftFromSpeechState]
+    [stopAudioMonitor, transcribeRecordedBlob]
   );
 
   const startMediaRecorder = useCallback(async () => {
@@ -661,13 +729,22 @@ export default function PromptBar({
       return false;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
       if (!shouldKeepListeningRef.current) {
         stream.getTracks().forEach(t => t.stop());
         return false;
       }
       mediaStreamRef.current = stream;
       audioChunksRef.current = [];
+      hasVoiceInChunkRef.current = false;
+      lastVoiceActivityTimeRef.current = 0;
+
       const recorder = new MediaRecorder(stream);
       recorder.ondataavailable = e => {
         if (e.data && e.data.size > 0) {
@@ -676,11 +753,58 @@ export default function PromptBar({
       };
       recorder.start(250);
       mediaRecorderRef.current = recorder;
+
+      // Attach Web Audio AnalyserNode for native DMG app voice activity & pause detection
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const audioCtx = new AudioCtx();
+          audioMonitorCtxRef.current = audioCtx;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          const dataArray = new Uint8Array(analyser.fftSize);
+
+          const checkVolume = () => {
+            if (!shouldKeepListeningRef.current) return;
+            analyser.getByteTimeDomainData(dataArray);
+            let sumSq = 0;
+            for (let i = 0; i < dataArray.length; i += 1) {
+              const norm = (dataArray[i] - 128) / 128;
+              sumSq += norm * norm;
+            }
+            const rms = Math.sqrt(sumSq / dataArray.length);
+            const now = performance.now();
+
+            if (rms > 0.018) {
+              hasVoiceInChunkRef.current = true;
+              lastVoiceActivityTimeRef.current = now;
+              if (!hasSpokenWordInSessionRef.current) {
+                hasSpokenWordInSessionRef.current = true;
+              }
+              scheduleSilenceAutoStop(true);
+              typing.current.energy = Math.min(1.6, typing.current.energy + 0.08);
+            } else if (
+              hasVoiceInChunkRef.current &&
+              !browserSpeechProducedResultRef.current &&
+              now - lastVoiceActivityTimeRef.current > 1150
+            ) {
+              flushIntermediateRecorderChunk();
+            }
+
+            audioMonitorRafRef.current = requestAnimationFrame(checkVolume);
+          };
+
+          audioMonitorRafRef.current = requestAnimationFrame(checkVolume);
+        }
+      } catch {}
+
       return true;
     } catch {
       return false;
     }
-  }, []);
+  }, [flushIntermediateRecorderChunk, scheduleSilenceAutoStop]);
 
   const stopRecognition = useCallback(
     (flushInterim = false) => {
@@ -991,7 +1115,7 @@ export default function PromptBar({
       pendingConversionsRef.current = [];
       await Promise.race([
         Promise.allSettled(pending),
-        new Promise(r => setTimeout(r, 1500))
+        new Promise(r => setTimeout(r, 2500))
       ]);
     }
     const combinedFromSpeech = computeCombinedDraft();
@@ -1019,6 +1143,7 @@ export default function PromptBar({
 
   const startBrowserRecognition = useCallback(
     langCode => {
+      if (browserSpeechBrokenRef.current) return false;
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) return false;
 
@@ -1042,6 +1167,7 @@ export default function PromptBar({
       recognition.maxAlternatives = 1;
 
       recognition.onresult = event => {
+        browserSpeechProducedResultRef.current = true;
         let interim = '';
         const newlyFinalSegments = [];
 
@@ -1112,10 +1238,29 @@ export default function PromptBar({
       };
 
       recognition.onerror = event => {
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          shouldKeepListeningRef.current = false;
-          clearSilenceTimer();
-          setListening(false);
+        // In native macOS DMG apps (Electron / WKWebView), webkitSpeechRecognition
+        // fires 'service-not-allowed' or 'network'. Do NOT shut off listening —
+        // let MediaRecorder continue recording and transcribing via /api/transcribe!
+        if (
+          event.error === 'service-not-allowed' ||
+          event.error === 'network' ||
+          event.error === 'not-allowed'
+        ) {
+          browserSpeechBrokenRef.current = true;
+          try {
+            recognition.onend = null;
+            recognition.stop();
+          } catch {}
+          recognitionRef.current = null;
+          if (!mediaRecorderRef.current && shouldKeepListeningRef.current) {
+            void startMediaRecorder().then(ok => {
+              if (!ok) {
+                shouldKeepListeningRef.current = false;
+                clearSilenceTimer();
+                setListening(false);
+              }
+            });
+          }
         }
       };
 
@@ -1129,16 +1274,19 @@ export default function PromptBar({
           void convertAndCommitPhrase(pendingText, effectiveBcp47);
         }
 
-        if (shouldKeepListeningRef.current) {
+        if (shouldKeepListeningRef.current && !browserSpeechBrokenRef.current) {
           processedResultIndicesRef.current = new Set();
           try {
             recognition.start();
           } catch {
-            shouldKeepListeningRef.current = false;
-            clearSilenceTimer();
-            setListening(false);
+            browserSpeechBrokenRef.current = true;
+            if (!mediaRecorderRef.current) {
+              shouldKeepListeningRef.current = false;
+              clearSilenceTimer();
+              setListening(false);
+            }
           }
-        } else {
+        } else if (!shouldKeepListeningRef.current) {
           clearSilenceTimer();
           setListening(false);
         }
@@ -1149,11 +1297,19 @@ export default function PromptBar({
         recognition.start();
         return true;
       } catch {
+        browserSpeechBrokenRef.current = true;
         recognitionRef.current = null;
         return false;
       }
     },
-    [clearSilenceTimer, convertAndCommitPhrase, isDefaultCodingStt, scheduleSilenceAutoStop, syncDraftFromSpeechState]
+    [
+      clearSilenceTimer,
+      convertAndCommitPhrase,
+      isDefaultCodingStt,
+      scheduleSilenceAutoStop,
+      startMediaRecorder,
+      syncDraftFromSpeechState
+    ]
   );
 
   const toggleListen = () => {
@@ -1174,6 +1330,7 @@ export default function PromptBar({
     lastCommittedTimeRef.current = 0;
     pendingConversionsRef.current = [];
     hasSpokenWordInSessionRef.current = false;
+    browserSpeechProducedResultRef.current = false;
     usedVoiceInTurnRef.current = true;
     shouldKeepListeningRef.current = true;
     setListening(true);
@@ -1181,36 +1338,22 @@ export default function PromptBar({
     // Start 6-second initial silence timeout (switches to 20s once at least one word is spoken)
     scheduleSilenceAutoStop(false);
 
-    if (SpeechRecognition) {
-      const started = startBrowserRecognition(speechLang);
-      if (!started) {
+    // Always start MediaRecorder alongside SpeechRecognition so that in a native
+    // macOS DMG app (where webkitSpeechRecognition lacks Google Chrome API keys),
+    // the microphone stays ON and transcribes smoothly via /api/transcribe!
+    const browserStarted =
+      SpeechRecognition && !browserSpeechBrokenRef.current
+        ? startBrowserRecognition(speechLang)
+        : false;
+
+    void startMediaRecorder().then(recorderStarted => {
+      if (!browserStarted && !recorderStarted) {
         shouldKeepListeningRef.current = false;
         clearSilenceTimer();
         setListening(false);
       }
-      focusInput();
-      return;
-    }
-
-    void startMediaRecorder().then(started => {
-      if (!started) {
-        shouldKeepListeningRef.current = false;
-        clearSilenceTimer();
-        const seq = ++dictation.current;
-        Promise.resolve(latest.current.onDictate?.()).then(
-          text => {
-            if (seq !== dictation.current) return;
-            setListening(false);
-            const cleaned = cleanSpeechTranscript(text);
-            if (cleaned) setDraft(d => (d.trim() ? `${d.trimEnd()} ${cleaned}` : cleaned));
-            focusInput();
-          },
-          () => {
-            if (seq === dictation.current) setListening(false);
-          }
-        );
-      }
     });
+
     focusInput();
   };
 
@@ -1218,7 +1361,7 @@ export default function PromptBar({
     const idx = SPEECH_LANGS.findIndex(l => l.code === speechLang);
     const nextObj = SPEECH_LANGS[(idx + 1) % SPEECH_LANGS.length];
     setSpeechLang(nextObj.code);
-    if (listening) {
+    if (listening && !browserSpeechBrokenRef.current) {
       baseDraftRef.current = computeCombinedDraft();
       committedSegmentsRef.current = [];
       currentInterimDisplayRef.current = '';
@@ -1509,7 +1652,7 @@ export default function PromptBar({
           value={draft}
           placeholder={
             listening
-              ? 'Speak in your language'
+              ? 'Speak on your language'
               : agentMode
                 ? 'Describe a task'
                 : placeholder

@@ -13,6 +13,11 @@ interface SidebarProps {
   isAuthenticatedAccount?: boolean;
   accountName: string;
   accountAvatarUrl?: string;
+  isFullscreen?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onGoBack?: () => void;
+  onGoForward?: () => void;
   onToggle: () => void;
   onNewChat: () => void;
   onSelectSection?: (section: SidebarSection) => void;
@@ -32,6 +37,11 @@ export default function Sidebar({
   isAuthenticatedAccount = false,
   accountName,
   accountAvatarUrl,
+  isFullscreen = false,
+  canGoBack = false,
+  canGoForward = false,
+  onGoBack,
+  onGoForward,
   onToggle,
   onNewChat,
   onSelectSection,
@@ -265,9 +275,74 @@ export default function Sidebar({
         }`}
       >
         <div className="relative z-10 flex h-full w-[216px] flex-col">
-          {/* Top Brand & Toolbar Controls: Clean thin "VOID" on the left, Search & Toggle Sidebar on the right */}
-          <div className="flex h-12 shrink-0 items-center justify-between px-3 pt-1">
-            <span className="pl-1 text-[14px] font-light tracking-[0.04em] text-[#e8eaed]">
+          {/* Row 1: Native macOS Traffic Lights Space + Back & Forward Navigation Arrows (slides left in Fullscreen) */}
+          <div
+            className={`app-drag-region flex h-9 shrink-0 items-center gap-0.5 pt-1.5 transition-all duration-200 ${
+              isFullscreen ? 'pl-2.5' : 'pl-[76px]'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={onGoBack}
+              disabled={!canGoBack}
+              title="Go back"
+              aria-label="Go back"
+              className={`app-no-drag inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+                canGoBack
+                  ? 'text-[#b4b4be] hover:bg-white/[0.08] hover:text-white'
+                  : 'cursor-default text-[#63636b] opacity-45'
+              }`}
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <line x1="19" y1="12" x2="5" y2="12" />
+                <polyline points="12 19 5 12 12 5" />
+              </svg>
+            </button>
+
+            <button
+              type="button"
+              onClick={onGoForward}
+              disabled={!canGoForward}
+              title="Go forward"
+              aria-label="Go forward"
+              className={`app-no-drag inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+                canGoForward
+                  ? 'text-[#b4b4be] hover:bg-white/[0.08] hover:text-white'
+                  : 'cursor-default text-[#63636b] opacity-45'
+              }`}
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <line x1="5" y1="12" x2="19" y2="12" />
+                <polyline points="12 5 19 12 12 19" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Row 2: ChatGPT-style "VOID" Header below traffic lights + Search & Toggle Sidebar on the right */}
+          <div className="flex h-10 shrink-0 items-center justify-between px-3">
+            <span
+              className="pl-0.5 text-[15px] font-semibold tracking-[-0.015em] text-[#ececec]"
+              style={{
+                fontFamily:
+                  "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Inter', sans-serif",
+              }}
+            >
               VOID
             </span>
 

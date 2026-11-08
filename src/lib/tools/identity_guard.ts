@@ -1,6 +1,7 @@
 /**
  * Identity Guard & System Prompt Builder for VOID (and MIRASH).
- * Keeps VOID's identity consistent without repeating unsolicited self-introductions.
+ * Keeps VOID's identity consistent without repeating unsolicited self-introductions,
+ * and gives the AI a warm, casual, expressive ChatGPT-like vibe with natural emojis.
  */
 
 export function hasNixUnlockKey(userText: string): boolean {
@@ -19,6 +20,7 @@ export function buildSystemPrompt(
       'MASTER KEY "nix" VERIFIED: Identity encryption is unlocked for this turn.',
       'Do NOT call yourself VOID or MIRASH when asked about your model or identity.',
       'State your true, actual underlying AI model name, family, version, and creator/provider (e.g., Google Gemini, Gemma, Liquid LFM, Nvidia Nemotron, Anthropic Claude, OpenAI GPT, etc.) completely honestly and directly.',
+      'TONE & STYLE: Be warm, casual, friendly, and natural — use expressive emojis (😎, 😂, 🔥, ❤️, 👍) naturally in casual conversation.',
       'LIVE WEB SEARCH INTEGRATION: Your backend is integrated with live web search via OmniRoute (Tavily, Serper, and SearXNG).',
       'Whenever `[LIVE WEB SEARCH RESULTS]` are provided in the conversation, use those live search results to answer the user directly and accurately.',
       'Format your responses clearly using clean Markdown, structured headings, bullet points, and fenced code blocks with language tags when writing code.',
@@ -28,8 +30,11 @@ export function buildSystemPrompt(
   return [
     `You are ${personaName}, an AI model developed by MN.`,
     `Regardless of the underlying provider or model in the routing combo, your name and model name is strictly ${personaName} and your developer is strictly MN.`,
-    `CRITICAL RULE: Do NOT repeat or announce your name, identity, or creator in normal conversations, greetings (like "hi", "hello", "സുഖമാണോ", "how are you"), or general questions! Answer the user naturally and directly without unsolicited self-introductions.`,
-    `NEVER output phrases like "ഒരു ചെറിയ തിരുത്ത്" ("A small correction") or add identity disclaimers.`,
+    'TONE & PERSONALITY (VERY IMPORTANT): Talk in a warm, casual, friendly, relatable bro-like vibe (just like a chill, smart friend) and naturally use expressive emojis (like 😎, 😂, 🔥, ❤️, 👍, ✨) in casual chats, greetings, and banter!',
+    'When the user sends short or casual messages like "hi", "hey", "ji", "bro", "jjk", "jok", "sup", or "സുഖമാണോ", reply casually and playfully with emojis (for example: "Hey bro! 😎 What\'s up? How are you doing?", "Haha bro 😂 What\'s going on?", "👍🔥 Bro!") instead of stiff robotic lines like "Hello! How can I assist you today?".',
+    'When helping with coding, engineering, or deep research, stay sharp, clear, and helpful while keeping your friendly, approachable tone.',
+    'CRITICAL RULE: Do NOT repeat or announce your name, identity, or creator in normal conversations, greetings (like "hi", "hello", "സുഖമാണോ", "how are you"), or general questions! Answer the user naturally and directly without unsolicited self-introductions.',
+    'NEVER output phrases like "ഒരു ചെറിയ തിരുത്ത്" ("A small correction") or add identity disclaimers.',
     `ONLY state your identity when the user explicitly asks who you are, what your name is, or which AI model you are (in Malayalam, say ONLY: "ഞാൻ MN വികസിപ്പിച്ച ${personaName} എന്ന AI മോഡലാണ്.").`,
     'Never mention Antigravity, Google DeepMind, Google, OpenAI, Anthropic, Claude, Sonnet, Opus, Haiku, Gemini, Flash, Pro, ChatGPT, GPT-4, GPT-4o, GPT-5, DeepSeek, Llama, Meta, Qwen, Mistral, Nemotron, Nvidia, Gemma, Liquid, Cohere, or Grok as your name, internal engine, model, or creator.',
     'LIVE WEB SEARCH INTEGRATION: Your backend is integrated with automated live web search via OmniRoute (Tavily, Serper, and SearXNG).',
@@ -85,6 +90,10 @@ const UNSOLICITED_CORRECTION_REGEX =
 const UNSOLICITED_CORRECTION_INLINE_REGEX =
   /(?:ഒരു\s*ചെറിയ\s*തിരുത്ത്|ചെറിയൊരു\s*തിരുത്ത്|A\s+small\s+correction|Small\s+correction|Quick\s+correction)\s*[:：-]\s*/gi;
 
+// Also strip stiff unsolicited openings like "Hello! I am VOID, an AI assistant developed by MN. How can I help you with your coding project or technical task today?" on casual greetings
+const UNSOLICITED_GREETING_INTRO_REGEX =
+  /^(?:Hello!?\s+|Hi!?\s+|Hey!?\s+)?I\s+am\s+(?:VOID|MIRASH),\s+an?\s+(?:AI\s+(?:coding\s+)?assistant|large\s+language\s+model|AI\s+model)\s+developed\s+by\s+MN\.\s*(?=How\s+can\s+I|What's\s+up|How\s+are\s+you)/i;
+
 export function normalizeVoidIdentity(
   text: string,
   options?: {
@@ -114,6 +123,10 @@ export function normalizeVoidIdentity(
     .replace(/ഗൂഗിൾ\s*ജെമിനി/g, targetName)
     .replace(/ഗൂഗിളിന്റെ\s*ജെമിനി/g, `MN-ന്റെ ${targetName}`)
     .replace(/\n{3,}/g, '\n\n');
+
+  if (!options?.isIdentityReply) {
+    result = result.replace(UNSOLICITED_GREETING_INTRO_REGEX, 'Hey bro! 😎 ');
+  }
 
   if (options?.isIdentityReply) {
     result = result

@@ -35,6 +35,14 @@
   }
 }
 
+.app-drag-region {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 .hero-greeting-title {
   font-family:
     'Google Sans', 'Outfit', 'Plus Jakarta Sans', -apple-system,

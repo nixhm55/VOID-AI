@@ -1,4 +1,5 @@
 import {
+  DEFAULT_COMBO_MODEL,
   VOIDAI_OPENAI_STT_MODELS,
   type VoidAiOpenAiSttModel,
   resolveOmniApiKeys,
@@ -9,7 +10,7 @@ import {
 
 /**
  * Ultra-Fast (<50ms) Trilingual Speech-to-Script Converter
- * + VoidAI & OmniRoute Audio Transcription (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1`)
+ * + VoidAI & OmniRoute Audio Transcription (`gpt-4o-transcribe` -> `gpt-4o-mini-transcribe` -> `whisper-1` -> Gemini Multimodal)
  * Supports both:
  * 1. `default` mode (explicit EN / ML / HI language selector button in PromptBar)
  * 2. Auto-detect mode (`gemini`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`)
@@ -142,14 +143,12 @@ export function detectSpokenLanguage(
   const cleaned = hint.toLowerCase().trim();
   if (!cleaned) return 'en';
 
-  // When running in Default (manual button) mode, respect the explicitly chosen button ('en', 'ml', 'hi')
   if (!autoDetect) {
     if (preferredLang === 'ml' || preferredLang === 'ml-in') return 'ml';
     if (preferredLang === 'hi' || preferredLang === 'hi-in') return 'hi';
     return 'en';
   }
 
-  // Automatic spoken-language detection mode
   if (MALAYALAM_ROMAN_REGEX.test(cleaned)) return 'ml';
   if (HINDI_ROMAN_REGEX.test(cleaned)) return 'hi';
 
@@ -277,6 +276,61 @@ export interface AudioTranscriptionResult {
   fallbackUsed: boolean;
 }
 
+async function readSseCompletionText(
+  body: ReadableStream<Uint8Array>,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let text = '';
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(':')) return;
+    const payload = line.startsWith('data:') ? line.slice(5).trim() : line;
+    if (payload === '[DONE]') return;
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      const first =
+        choices.length > 0 && choices[0] && typeof choices[0] === 'object'
+          ? (choices[0] as Record<string, unknown>)
+          : null;
+      const delta =
+        first?.delta && typeof first.delta === 'object'
+          ? (first.delta as Record<string, unknown>)
+          : null;
+      const msg =
+        first?.message && typeof first.message === 'object'
+          ? (first.message as Record<string, unknown>)
+          : null;
+      const piece =
+        typeof delta?.content === 'string'
+          ? delta.content
+          : typeof msg?.content === 'string'
+            ? msg.content
+            : '';
+      if (piece) text += piece;
+    } catch {
+      // Ignore partial lines
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const l of lines) processLine(l);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    for (const l of buffer.split('\n')) processLine(l);
+  }
+  return text.trim();
+}
+
 /**
  * Transcribes spoken audio via VoidAI (`POST https://api.voidai.app/v1/audio/transcriptions`)
  * and OmniRoute (`POST https://omniroute-server-production-eea0.up.railway.app/v1/audio/transcriptions`)
@@ -284,6 +338,7 @@ export interface AudioTranscriptionResult {
  * 1. `gpt-4o-transcribe`
  * 2. `gpt-4o-mini-transcribe`
  * 3. `whisper-1`
+ * 4. Gemini multimodal chat completion fallback (`/v1/chat/completions`)
  */
 export async function transcribeAudioViaVoidAi(
   options: AudioTranscriptionRequest,
@@ -322,6 +377,18 @@ export async function transcribeAudioViaVoidAi(
           ? 'en'
           : undefined;
 
+  const finalizeTranscript = async (rawText: string): Promise<string> => {
+    const cleaned = cleanTrilingualText(rawText);
+    if (!cleaned) return '';
+    if (
+      (explicitIsoLang === 'ml' || explicitIsoLang === 'hi') &&
+      /[a-zA-Z]/.test(cleaned)
+    ) {
+      return await googleInputToolsTransliterate(cleaned, explicitIsoLang);
+    }
+    return cleaned;
+  };
+
   const endpointsToTry: Array<{ endpoint: string; apiKey: string }> = [];
   if (voidApiKey) {
     endpointsToTry.push({
@@ -341,7 +408,7 @@ export async function transcribeAudioViaVoidAi(
   for (const { endpoint, apiKey } of endpointsToTry) {
     for (const candidateModel of chain) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 14000);
+      const timer = setTimeout(() => controller.abort(), 11000);
 
       try {
         const formData = new FormData();
@@ -351,7 +418,13 @@ export async function transcribeAudioViaVoidAi(
         formData.append('response_format', 'json');
         formData.append(
           'prompt',
-          'Transcribe verbatim in the original spoken language and native script (English, മലയാളം, हिन्दी). Do not translate.',
+          explicitIsoLang === 'ml'
+            ? 'Transcribe verbatim in Malayalam script (മലയാളം).'
+            : explicitIsoLang === 'hi'
+              ? 'Transcribe verbatim in Hindi Devanagari script (हिन्दी).'
+              : explicitIsoLang === 'en'
+                ? 'Transcribe verbatim in English.'
+                : 'Transcribe verbatim in the original spoken language and native script (English, മലയാളം, हिन्दी). Do not translate.',
         );
         if (explicitIsoLang) {
           formData.append('language', explicitIsoLang);
@@ -376,7 +449,7 @@ export async function transcribeAudioViaVoidAi(
 
         const data = (await res.json()) as Record<string, unknown>;
         const rawText = String(data.text ?? '').trim();
-        const cleaned = collapseDuplicateSpeech(rawText);
+        const cleaned = await finalizeTranscript(rawText);
         if (cleaned) {
           return {
             text: cleaned,
@@ -392,6 +465,91 @@ export async function transcribeAudioViaVoidAi(
             ? err.message
             : `STT (${candidateModel}) failed`;
       }
+    }
+  }
+
+  // Fallback 4: Multimodal Chat Completion on OmniRoute (`void-combo`)
+  const audioBase64 = Buffer.from(options.audioBytes).toString('base64');
+  const format = cleanMimeType.includes('wav')
+    ? 'wav'
+    : cleanMimeType.includes('mp4')
+      ? 'mp4'
+      : cleanMimeType.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+
+  for (const omniKey of omniKeys) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    try {
+      const res = await fetch(`${omniBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${omniKey}`,
+        },
+        body: JSON.stringify({
+          model: DEFAULT_COMBO_MODEL,
+          stream: true,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a strict Speech-to-Text transcriber. Output ONLY the exact spoken words from the audio in English, Malayalam (മലയാളം), or Hindi (हिन्दी). Never answer questions or add explanations. If silent, output nothing.',
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    explicitIsoLang === 'ml'
+                      ? 'Transcribe this audio in Malayalam script (മലയാളം). Output ONLY the spoken words.'
+                      : explicitIsoLang === 'hi'
+                        ? 'Transcribe this audio in Hindi script (हिन्दी). Output ONLY the spoken words.'
+                        : 'Transcribe this audio verbatim in English, മലയാളം, or हिन्दी. Output ONLY the spoken words.',
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${cleanMimeType};base64,${audioBase64}`,
+                  },
+                },
+                {
+                  type: 'input_audio',
+                  input_audio: {
+                    data: audioBase64,
+                    format,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (res.ok && res.body) {
+        const rawOut = await readSseCompletionText(res.body);
+        if (
+          rawOut &&
+          !/^(i\s+am|sorry|i\s+cannot|i\s+can't|unable|there\s+is\s+no)/i.test(
+            rawOut.trim(),
+          )
+        ) {
+          const cleaned = await finalizeTranscript(rawOut);
+          if (cleaned) {
+            return {
+              text: cleaned,
+              usedModel: requestedFirst,
+              fallbackUsed: true,
+            };
+          }
+        }
+      }
+    } catch {
+      clearTimeout(timer);
     }
   }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PromptBar from './components/PromptBar';
 import LatticeLoader from './components/LatticeLoader';
 import AiMessage from './components/AiMessage';
@@ -45,6 +45,33 @@ import {
   refreshChatHistory,
   subscribeToChatHistory,
 } from './lib/chat-persistence';
+
+interface NavHistoryEntry {
+  section: SidebarSection;
+  chatId: string | null;
+  agentMode: boolean;
+}
+
+function detectWindowFullscreen(): boolean {
+  if (typeof window === 'undefined') return false;
+  const doc = document as Document & { webkitFullscreenElement?: Element | null };
+  if (doc.fullscreenElement || doc.webkitFullscreenElement) return true;
+  try {
+    if (window.matchMedia('(display-mode: fullscreen)').matches) return true;
+  } catch {
+    // Ignore
+  }
+  if (
+    window.screen &&
+    window.screen.width > 0 &&
+    window.screen.height > 0 &&
+    Math.abs(window.innerWidth - window.screen.width) <= 2 &&
+    Math.abs(window.innerHeight - window.screen.height) <= 2
+  ) {
+    return true;
+  }
+  return false;
+}
 
 const sessionFingerprint = (session: ChatSession) => {
   const lastMsg = session.messages[session.messages.length - 1];
@@ -391,11 +418,7 @@ function GoogleEmblemIcon() {
 }
 
 /**
- * Chat Mode 3-Dot Wave + Faded-Out Grey Live AI Thoughts Indicator:
- * - The thinking text starts at `left: 0` of the 720px column — on the EXACT same
- *   vertical alignment line as the AI response text ("Hey!...") and the PromptBar's left edge.
- * - The 3 waving dots (`• • •`) sit OUTSIDE to the left (`right-full mr-2`) with tight spacing.
- * - When web search is active, displays the Google `G` emblem alongside the search status.
+ * Chat Mode 3-Dot Wave + Faded-Out Grey Live AI Thoughts Indicator
  */
 function ChatThinkingWave({
   userPrompt,
@@ -487,7 +510,7 @@ function TopModeCapsule({
     <div
       role="tablist"
       aria-label="Conversation mode"
-      className="inline-flex items-center rounded-full border border-white/[0.08] bg-[#141418]/90 p-1 shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md transition-all duration-300"
+      className="app-no-drag inline-flex items-center rounded-full border border-white/[0.08] bg-[#141418]/90 p-1 shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md transition-all duration-300"
     >
       <button
         type="button"
@@ -528,6 +551,19 @@ export default function App() {
   const [agentMode, setAgentMode] = useState<boolean>(false);
   const [connectedFolders, setConnectedFolders] = useState<string[]>([]);
   const [newChatAnimKey, setNewChatAnimKey] = useState<number>(1);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    detectWindowFullscreen(),
+  );
+
+  // Session-scoped Back / Forward navigation stack (resets cleanly if the app is quit and reopened,
+  // and navigates between visited views without deleting or rewinding any tasks or messages!)
+  const [navState, setNavState] = useState<{
+    entries: NavHistoryEntry[];
+    index: number;
+  }>({
+    entries: [{ section: 'chat', chatId: null, agentMode: false }],
+    index: 0,
+  });
 
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
@@ -553,6 +589,93 @@ export default function App() {
     preThinkEngineRef.current = new SpeculativePreThinkEngine();
   }
   const checkedInitialAuthModalRef = useRef(false);
+
+  // Track macOS native window Fullscreen vs Windowed state
+  useEffect(() => {
+    const updateFullscreen = () => {
+      setIsFullscreen(detectWindowFullscreen());
+    };
+    updateFullscreen();
+    window.addEventListener('resize', updateFullscreen);
+    document.addEventListener('fullscreenchange', updateFullscreen);
+    document.addEventListener('webkitfullscreenchange', updateFullscreen);
+    return () => {
+      window.removeEventListener('resize', updateFullscreen);
+      document.removeEventListener('fullscreenchange', updateFullscreen);
+      document.removeEventListener('webkitfullscreenchange', updateFullscreen);
+    };
+  }, []);
+
+  const pushNavEntry = useCallback(
+    (nextEntry: NavHistoryEntry) => {
+      setNavState((prev) => {
+        const current = prev.entries[prev.index];
+        if (
+          current &&
+          current.section === nextEntry.section &&
+          current.chatId === nextEntry.chatId &&
+          current.agentMode === nextEntry.agentMode
+        ) {
+          return prev;
+        }
+        const sliced = prev.entries.slice(0, prev.index + 1);
+        const nextEntries = [...sliced, nextEntry];
+        return {
+          entries: nextEntries,
+          index: nextEntries.length - 1,
+        };
+      });
+    },
+    [],
+  );
+
+  const canGoBack = navState.index > 0;
+  const canGoForward = navState.index < navState.entries.length - 1;
+
+  const handleGoBack = useCallback(() => {
+    if (navState.index <= 0) return;
+    const nextIdx = navState.index - 1;
+    const target = navState.entries[nextIdx];
+    if (!target) return;
+    setNavState((prev) => ({ ...prev, index: nextIdx }));
+    setActiveSection(target.section);
+    setActiveChatId(target.chatId);
+    setAgentMode(target.agentMode);
+    if (target.chatId === null) {
+      setNewChatAnimKey((k) => k + 1);
+    }
+  }, [navState]);
+
+  const handleGoForward = useCallback(() => {
+    if (navState.index >= navState.entries.length - 1) return;
+    const nextIdx = navState.index + 1;
+    const target = navState.entries[nextIdx];
+    if (!target) return;
+    setNavState((prev) => ({ ...prev, index: nextIdx }));
+    setActiveSection(target.section);
+    setActiveChatId(target.chatId);
+    setAgentMode(target.agentMode);
+    if (target.chatId === null) {
+      setNewChatAnimKey((k) => k + 1);
+    }
+  }, [navState]);
+
+  // Support macOS Cmd + [ (Back) and Cmd + ] (Forward)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey && !e.shiftKey && !e.altKey) {
+        if (e.key === '[') {
+          e.preventDefault();
+          handleGoBack();
+        } else if (e.key === ']') {
+          e.preventDefault();
+          handleGoForward();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleGoBack, handleGoForward]);
 
   const handleStopGeneration = () => {
     controller.current?.abort();
@@ -626,8 +749,6 @@ export default function App() {
   const isAuthenticatedAccount = Boolean(authUser && !authUser.is_anonymous);
   const hasAnyActiveSession = Boolean(isAuthenticatedAccount || guestProfile);
 
-  // On first visit (if neither signed in with a real account nor logged in as Guest in localStorage),
-  // automatically open the Login Modal! Once Guest or Account is logged in, it persists across refreshes/restarts.
   useEffect(() => {
     if (!historyReady || checkedInitialAuthModalRef.current) return;
     checkedInitialAuthModalRef.current = true;
@@ -639,8 +760,6 @@ export default function App() {
     }
   }, [historyReady, authUser]);
 
-  // Extract Google / Authenticated user's display name or Guest name, preserving exact user-entered casing!
-  // Returns empty string '' when no account or guest is logged in yet (so greeting says "Hi, what's on your mind?").
   const accountDisplayName = useMemo(() => {
     if (isAuthenticatedAccount && authUser) {
       const meta = authUser.user_metadata as
@@ -675,7 +794,6 @@ export default function App() {
     return url || undefined;
   }, [authUser, isAuthenticatedAccount]);
 
-  // Preserve exact casing typed by the user; if not logged in / no guest name yet, empty string -> "Hi, what's on your mind?"
   const userFirstName = useMemo(() => {
     if (!accountDisplayName.trim()) return '';
     return accountDisplayName.trim().split(/\s+/)[0] || '';
@@ -884,7 +1002,7 @@ export default function App() {
     setConnectedFolders((prev) => prev.filter((name) => name !== folderName));
   };
 
-  // New Chat resets to 'Chat' mode and triggers the blooming entrance animation
+  // New Chat resets to 'Chat' mode and records navigation history without deleting any existing chats
   const handleNewChat = () => {
     if (busy) {
       controller.current?.abort();
@@ -895,6 +1013,16 @@ export default function App() {
     setActiveChatId(null);
     setAgentMode(false);
     setNewChatAnimKey((k) => k + 1);
+    pushNavEntry({ section: 'chat', chatId: null, agentMode: false });
+  };
+
+  const handleSelectSection = (sec: SidebarSection) => {
+    setActiveSection(sec);
+    pushNavEntry({
+      section: sec,
+      chatId: activeChatId,
+      agentMode: effectiveAgentMode,
+    });
   };
 
   const handleSelectChat = (id: string) => {
@@ -904,15 +1032,15 @@ export default function App() {
       setStreamingId(null);
     }
     const targetSession = sessions.find((s) => s.id === id);
-    if (targetSession) {
-      const targetIsAgent =
-        typeof targetSession.agentMode === 'boolean'
-          ? targetSession.agentMode
-          : targetSession.messages.some((m) => Boolean(m.agentMode));
-      setAgentMode(targetIsAgent);
-    }
+    const targetIsAgent = targetSession
+      ? typeof targetSession.agentMode === 'boolean'
+        ? targetSession.agentMode
+        : targetSession.messages.some((m) => Boolean(m.agentMode))
+      : false;
+    setAgentMode(targetIsAgent);
     setActiveSection('chat');
     setActiveChatId(id);
+    pushNavEntry({ section: 'chat', chatId: id, agentMode: targetIsAgent });
   };
 
   const handleTogglePin = (id: string) => {
@@ -967,6 +1095,10 @@ export default function App() {
     setActiveChatId(null);
     setAgentMode(false);
     persistedHashes.current = {};
+    setNavState({
+      entries: [{ section: 'chat', chatId: null, agentMode: false }],
+      index: 0,
+    });
     if (authUser && historyReady) {
       void deleteAllChatHistory(authUser.id).catch((error: unknown) => {
         const details = error instanceof Error ? ` ${error.message}` : '';
@@ -977,10 +1109,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Logs out of any account (both Google/Email accounts AND Guest sessions)
-   * when triggered from Settings -> General -> Log out or AuthModal.
-   */
   const handleFullLogOut = async () => {
     if (busy) {
       controller.current?.abort();
@@ -1346,6 +1474,11 @@ export default function App() {
     const targetChatId = activeChatId ?? createClientId();
     if (!activeChatId) {
       setActiveChatId(targetChatId);
+      pushNavEntry({
+        section: 'chat',
+        chatId: targetChatId,
+        agentMode: Boolean(isAgent),
+      });
     }
 
     const uploadedImageUrls = extractAttachmentImageUrls(attachments);
@@ -1353,7 +1486,6 @@ export default function App() {
       text.trim() ||
       (uploadedImageUrls.length > 0 ? 'Analyze this image' : '');
 
-    // Consume any invisible background pre-thought generated while the user was typing/speaking
     const preThought =
       !isAgent && uploadedImageUrls.length === 0
         ? preThinkEngineRef.current?.consumeForSend(effectiveText) ?? null
@@ -1381,7 +1513,6 @@ export default function App() {
     }
 
     const aiMsgId = createClientId();
-    // Voice-Only Auto-Read: ONLY auto-read when the message was sent via microphone dictation!
     const shouldAutoReadThisTurn = Boolean(sentViaVoice);
 
     appendOrUpdateSessionMessages(
@@ -1391,8 +1522,6 @@ export default function App() {
       Boolean(isAgent),
     );
 
-    // Fast-path: If background pre-thinking already completed an exact response for this exact text,
-    // deliver it immediately so the response feels instantaneous!
     if (
       preThought?.exactReply &&
       preThought.exactReply.trim().length > 0 &&
@@ -1599,7 +1728,7 @@ export default function App() {
             : 'bg-[#080a10]'
       }`}
     >
-      {/* Dedicated Full-Screen Background Layer Behind Both Sidebar & Main Viewport (so Sidebar is true glass on top of it!) */}
+      {/* Dedicated Full-Screen Background Layer Behind Both Sidebar & Main Viewport */}
       <div
         aria-hidden="true"
         className={`pointer-events-none absolute inset-0 z-0 transition-opacity duration-500 ease-in-out ${
@@ -1632,9 +1761,14 @@ export default function App() {
         isAuthenticatedAccount={isAuthenticatedAccount}
         accountName={accountDisplayName}
         accountAvatarUrl={accountAvatarUrl}
+        isFullscreen={isFullscreen}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onGoBack={handleGoBack}
+        onGoForward={handleGoForward}
         onToggle={() => setSidebarOpen((v) => !v)}
         onNewChat={handleNewChat}
-        onSelectSection={(sec) => setActiveSection(sec)}
+        onSelectSection={handleSelectSection}
         onSelectChat={handleSelectChat}
         onTogglePin={handleTogglePin}
         onDeleteChat={handleDeleteChat}
@@ -1645,16 +1779,76 @@ export default function App() {
       {/* Main Viewport */}
       <main className="relative z-10 flex h-full flex-1 flex-col overflow-hidden bg-transparent">
         {/* Top Bar */}
-        <header className="relative z-10 flex h-14 shrink-0 items-center justify-between px-4">
-          <div className="flex w-28 items-center gap-1.5">
+        <header className="app-drag-region relative z-10 flex h-14 shrink-0 items-center justify-between px-4">
+          <div
+            className={`flex items-center gap-1 transition-all duration-200 ${
+              !sidebarOpen
+                ? isFullscreen
+                  ? 'pl-1'
+                  : 'pl-[72px]'
+                : 'w-28'
+            }`}
+          >
             {!sidebarOpen ? (
               <>
+                <button
+                  type="button"
+                  onClick={handleGoBack}
+                  disabled={!canGoBack}
+                  title="Go back"
+                  aria-label="Go back"
+                  className={`app-no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                    canGoBack
+                      ? 'text-[#b4b4be] hover:bg-white/[0.07] hover:text-white'
+                      : 'cursor-default text-[#63636b] opacity-45'
+                  }`}
+                >
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="19" y1="12" x2="5" y2="12" />
+                    <polyline points="12 19 5 12 12 5" />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleGoForward}
+                  disabled={!canGoForward}
+                  title="Go forward"
+                  aria-label="Go forward"
+                  className={`app-no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                    canGoForward
+                      ? 'text-[#b4b4be] hover:bg-white/[0.07] hover:text-white'
+                      : 'cursor-default text-[#63636b] opacity-45'
+                  }`}
+                >
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                    <polyline points="12 5 19 12 12 19" />
+                  </svg>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setSidebarOpen(true)}
                   title="Toggle sidebar"
                   aria-label="Toggle sidebar"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
+                  className="app-no-drag inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
                 >
                   <svg
                     className="h-4 w-4"
@@ -1675,7 +1869,7 @@ export default function App() {
                   onClick={handleNewChat}
                   title="New chat"
                   aria-label="New chat"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
+                  className="app-no-drag inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
                 >
                   <svg
                     className="h-4 w-4"
@@ -1701,6 +1895,11 @@ export default function App() {
                 onSelectMode={(next) => {
                   setAgentMode(next);
                   setNewChatAnimKey((k) => k + 1);
+                  pushNavEntry({
+                    section: 'chat',
+                    chatId: null,
+                    agentMode: next,
+                  });
                 }}
               />
             ) : null}
@@ -1713,7 +1912,7 @@ export default function App() {
                 onClick={() => setSettingsOpen(true)}
                 title="Settings"
                 aria-label="Settings"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
+                className="app-no-drag inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#b4b4be] transition-colors hover:bg-white/[0.07] hover:text-white"
               >
                 <svg
                   className="h-4 w-4"
