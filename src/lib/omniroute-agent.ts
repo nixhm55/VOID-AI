@@ -727,6 +727,91 @@ export function formatSseDataFrame(content: string): string {
   return `data: ${frame}\n\n`;
 }
 
+export function formatChatThoughtSseFrame(
+  chatThought: string,
+  searchSource?: 'google' | 'reddit' | 'web',
+): string {
+  const frame = JSON.stringify({
+    chatThought,
+    ...(searchSource ? { searchSource } : {}),
+  });
+  return `data: ${frame}\n\n`;
+}
+
+/**
+ * Builds natural AI thought sentences WITHOUT ever quoting or repeating the user's raw text.
+ */
+export function buildContextualChatThoughts(userRawText: string): string[] {
+  const raw = userRawText.trim();
+  const lower = raw.toLowerCase();
+
+  if (!raw) {
+    return [
+      'Examining the attached context and visual details…',
+      'Identifying key elements and preparing a clear explanation…',
+    ];
+  }
+
+  if (
+    /^(hi+|hello+|hey+|hlo+|yo+|hola|sup|namaskaram|salaam|assalamu\s*alaikum|good\s*(morning|afternoon|evening))[!.?\s]*$/i.test(
+      raw,
+    )
+  ) {
+    return [
+      'Recognizing the greeting and checking conversation context…',
+      'Considering a warm and natural way to respond…',
+      'Formulating a friendly, helpful opening reply…',
+    ];
+  }
+
+  if (raw.length <= 4 && !/\s/.test(raw)) {
+    return [
+      'Interpreting the message intent and conversation context…',
+      'Checking possible meanings and relevant context…',
+      'Formulating a clear, natural response…',
+    ];
+  }
+
+  if (/[\u0D00-\u0D7F]/.test(raw)) {
+    return [
+      'സന്ദേശത്തിന്റെ ആശയവും പശ്ചാത്തലവും വിശകലനം ചെയ്യുന്നു…',
+      'പ്രധാന വിവരങ്ങൾ പരിശോധിച്ച് മറുപടി ക്രമീകരിക്കുന്നു…',
+      'വ്യക്തവും കൃത്യവുമായ മറുപടി തയ്യാറാക്കുന്നു…',
+    ];
+  }
+
+  if (
+    /\b(code|bug|error|fix|function|react|typescript|python|css|html|api|component|build|compile)\b/i.test(
+      lower,
+    )
+  ) {
+    return [
+      'Analyzing the technical architecture and code requirements…',
+      'Evaluating edge cases, logic flow, and implementation details…',
+      'Structuring a clean, accurate solution…',
+    ];
+  }
+
+  if (
+    /^(what|how|why|when|where|who|which|can|could|should|is|are|do|does|explain|tell)\b/i.test(
+      lower,
+    ) ||
+    raw.endsWith('?')
+  ) {
+    return [
+      'Analyzing the core question and relevant context…',
+      'Recalling key facts and verifying details…',
+      'Organizing a clear and direct explanation…',
+    ];
+  }
+
+  return [
+    'Understanding the context and key points of the message…',
+    'Evaluating the best approach to address the request…',
+    'Drafting a clear, helpful response…',
+  ];
+}
+
 function formatWorkspaceContextForPrompt(
   workspace?: WorkspaceContextInput,
   terminalResult?: TerminalToolContinuation,
@@ -1117,6 +1202,13 @@ export async function executeOmniRouteAgent(options: {
     : '';
   const chatEndpoint = `${cleanBaseUrl}/chat/completions`;
 
+  if (!isAgentActive && !signal?.aborted) {
+    const initialThoughts = buildContextualChatThoughts(lastUserRawText);
+    if (initialThoughts.length > 0) {
+      onSseFrame(formatChatThoughtSseFrame(initialThoughts[0]));
+    }
+  }
+
   const conversationMessages: Array<{
     role: string;
     content: string;
@@ -1144,6 +1236,11 @@ export async function executeOmniRouteAgent(options: {
   if (preSearchNeeded && searchQuery && !signal?.aborted) {
     hasSearched = true;
     emitAgentPlanUpdate('step-search', 'running');
+    if (!isAgentActive) {
+      onSseFrame(
+        formatChatThoughtSseFrame('Searching Google…', 'google'),
+      );
+    }
     try {
       const isNews = /\b(news|headlines|breaking|latest\s+updates)\b/i.test(
         lastUserRawText,
@@ -1154,6 +1251,11 @@ export async function executeOmniRouteAgent(options: {
         maxResults: isAgentActive ? 8 : 6,
         baseUrl: cleanBaseUrl,
         apiKeys: resolvedKeys,
+        onSearchStage: (source, statusText) => {
+          if (!isAgentActive && !signal?.aborted) {
+            onSseFrame(formatChatThoughtSseFrame(statusText, source));
+          }
+        },
       });
 
       if (searchResult.results.length > 0 || searchResult.answer) {
@@ -1163,6 +1265,14 @@ export async function executeOmniRouteAgent(options: {
           'completed',
           `Retrieved ${searchResult.results.length} live sources via ${searchResult.provider}`,
         );
+        if (!isAgentActive && !signal?.aborted) {
+          onSseFrame(
+            formatChatThoughtSseFrame(
+              `Synthesizing findings from ${searchResult.provider}…`,
+              'google',
+            ),
+          );
+        }
       } else {
         emitAgentPlanUpdate('step-search', 'completed');
       }

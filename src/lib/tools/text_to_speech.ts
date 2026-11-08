@@ -240,7 +240,7 @@ export async function synthesizeSpeechViaVoidAi(options: {
     );
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 14000);
+    const timer = setTimeout(() => controller.abort(), 2400);
 
     try {
       const payload: Record<string, unknown> = {
@@ -427,52 +427,48 @@ export async function synthesizeSpeechViaOmniRoute(
   const speechEndpoint = `${baseUrl}/audio/speech`;
   const lang = String(options.lang ?? 'en-US').trim();
 
-  // 2. Secondary: OmniRoute (`/v1/audio/speech`)
-  for (const apiKey of apiKeys) {
-    for (const candidate of ELEVENLABS_OMNIROUTE_CANDIDATES) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 7500);
-
-      try {
-        const res = await fetch(speechEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: options.model || candidate.model,
-            input: cleanText.slice(0, 1200),
-            voice: options.voice?.replace(/^openai-/, '') || candidate.voice,
-            response_format: 'mp3',
-          }),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timer);
-
-        const contentType = res.headers.get('content-type') || '';
-        if (
-          res.ok &&
-          (contentType.includes('audio') ||
-            contentType.includes('octet-stream'))
-        ) {
-          const arrayBuf = await res.arrayBuffer();
-          if (arrayBuf.byteLength > 256) {
-            return {
-              audioBuffer: arrayBuf,
-              contentType: contentType.includes('audio')
-                ? contentType
-                : 'audio/mpeg',
-              provider: 'elevenlabs-omniroute',
-              usedModel: options.model || candidate.model,
-              usedVoice: options.voice || candidate.voice,
-            };
-          }
+  // 2. Secondary: OmniRoute (`/v1/audio/speech`) — fast 1.8s check on primary key
+  const primaryKey = apiKeys[0];
+  if (primaryKey) {
+    const candidate = ELEVENLABS_OMNIROUTE_CANDIDATES[0];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1800);
+    try {
+      const res = await fetch(speechEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${primaryKey}`,
+        },
+        body: JSON.stringify({
+          model: options.model || candidate.model,
+          input: cleanText.slice(0, 1200),
+          voice: options.voice?.replace(/^openai-/, '') || candidate.voice,
+          response_format: 'mp3',
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const contentType = res.headers.get('content-type') || '';
+      if (
+        res.ok &&
+        (contentType.includes('audio') || contentType.includes('octet-stream'))
+      ) {
+        const arrayBuf = await res.arrayBuffer();
+        if (arrayBuf.byteLength > 256) {
+          return {
+            audioBuffer: arrayBuf,
+            contentType: contentType.includes('audio')
+              ? contentType
+              : 'audio/mpeg',
+            provider: 'elevenlabs-omniroute',
+            usedModel: options.model || candidate.model,
+            usedVoice: options.voice || candidate.voice,
+          };
         }
-      } catch {
-        clearTimeout(timer);
       }
+    } catch {
+      clearTimeout(timer);
     }
   }
 

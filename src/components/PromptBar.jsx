@@ -166,7 +166,6 @@ const DEFAULT_COMMANDS = [
   { key: 'tasks', name: '/tasks', description: 'Turn this into a to-do list' }
 ];
 const DEFAULT_MODELS = [
-  { key: '4-Argon', name: '4 Argon', shortName: 'Argon', tag: '' },
   { key: 'void-combo', name: 'VOID', shortName: 'VOID', tag: '' },
   { key: 'mirash', name: 'MIRASH', shortName: 'MIRASH', tag: '' }
 ];
@@ -331,6 +330,7 @@ export default function PromptBar({
   onDisconnectFolder = (_folderName = '') => {},
   busy = false,
   onSend,
+  onDraftChange,
   onStop,
   onAttach,
   onDictate,
@@ -376,10 +376,12 @@ export default function PromptBar({
   const interimConvertSeqRef = useRef(0);
   const pendingConversionsRef = useRef([]);
   const shouldKeepListeningRef = useRef(false);
+  const usedVoiceInTurnRef = useRef(false);
   const stopRecognitionRef = useRef(() => {});
   const latest = useRef({});
   latest.current = {
     onSend,
+    onDraftChange,
     onStop,
     onAttach,
     onDictate,
@@ -474,7 +476,10 @@ export default function PromptBar({
   }, []);
 
   const syncDraftFromSpeechState = useCallback(() => {
-    setDraft(computeCombinedDraft());
+    const combined = computeCombinedDraft();
+    usedVoiceInTurnRef.current = true;
+    setDraft(combined);
+    latest.current.onDraftChange?.(combined);
   }, [computeCombinedDraft]);
 
   const convertAndCommitPhrase = useCallback(
@@ -972,8 +977,14 @@ export default function PromptBar({
 
   const send = async () => {
     if (!canSend || busy) return;
+    const sentViaVoice = Boolean(listening || usedVoiceInTurnRef.current);
     if (listening) {
       stopRecognition(true);
+    }
+    if (sentViaVoice && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.getVoices();
+      } catch {}
     }
     if (pendingConversionsRef.current.length > 0) {
       const pending = [...pendingConversionsRef.current];
@@ -991,11 +1002,13 @@ export default function PromptBar({
     committedSegmentsRef.current = [];
     currentInterimDisplayRef.current = '';
     latestRawInterimRef.current = '';
+    usedVoiceInTurnRef.current = false;
     latest.current.onSend?.(finalToSend || collapseRepeatedSpeech(draft), {
       attachments,
       model,
       effort: level,
-      agentMode
+      agentMode,
+      sentViaVoice
     });
     setDraft('');
     setAttachments([]);
@@ -1161,6 +1174,7 @@ export default function PromptBar({
     lastCommittedTimeRef.current = 0;
     pendingConversionsRef.current = [];
     hasSpokenWordInSessionRef.current = false;
+    usedVoiceInTurnRef.current = true;
     shouldKeepListeningRef.current = true;
     setListening(true);
 
@@ -1503,13 +1517,18 @@ export default function PromptBar({
           aria-label="Prompt"
           onPaste={handlePaste}
           onChange={e => {
-            setDraft(e.target.value);
+            const nextVal = e.target.value;
+            setDraft(nextVal);
+            if (!listening) {
+              usedVoiceInTurnRef.current = false;
+            }
             if (listening) {
-              baseDraftRef.current = e.target.value;
+              baseDraftRef.current = nextVal;
               committedSegmentsRef.current = [];
               currentInterimDisplayRef.current = '';
               latestRawInterimRef.current = '';
             }
+            latest.current.onDraftChange?.(nextVal);
             typing.current.energy = Math.min(1.6, typing.current.energy + 0.22);
             typing.current.strokes = Math.min(4, typing.current.strokes + 1);
             setDismissed(false);

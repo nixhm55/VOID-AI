@@ -26,6 +26,7 @@ export interface ChatMessage {
   agentSteps?: AgentPlanStep[];
   agentTaskTitle?: string;
   pendingCommand?: PendingTerminalCommand;
+  shouldAutoRead?: boolean;
   createdAt?: number;
 }
 

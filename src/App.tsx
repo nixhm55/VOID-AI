@@ -18,6 +18,8 @@ import {
   type StreamChatMessage,
   type TerminalToolContinuation,
 } from './lib/chat-stream';
+import { SpeculativePreThinkEngine } from './lib/speculative-prethink';
+import { shouldTriggerWebSearch } from './lib/tools/search_engine';
 import {
   type AgentPlanStep,
   type ChatAttachment,
@@ -290,6 +292,187 @@ function UserMessageBubble({
   );
 }
 
+function deriveContextualChatThoughts(userPrompt: string): string[] {
+  const raw = userPrompt.trim();
+  const lower = raw.toLowerCase();
+
+  if (!raw) {
+    return [
+      'Examining your attached media and visual details…',
+      'Identifying key elements and preparing a clear response…',
+    ];
+  }
+
+  if (
+    /^(hi+|hello+|hey+|hlo+|yo+|hola|sup|namaskaram|salaam|assalamu\s*alaikum|good\s*(morning|afternoon|evening))[!.?\s]*$/i.test(
+      raw,
+    )
+  ) {
+    return [
+      'Recognizing the greeting and checking conversation context…',
+      'Thinking of a warm, natural way to greet you back…',
+      'Formulating a friendly opening response…',
+    ];
+  }
+
+  if (raw.length <= 4 && !/\s/.test(raw)) {
+    return [
+      'Interpreting the message intent and conversation context…',
+      'Checking possible meanings and relevant context…',
+      'Preparing a clear, helpful reply…',
+    ];
+  }
+
+  if (/[\u0D00-\u0D7F]/.test(raw)) {
+    return [
+      'സന്ദേശത്തിന്റെ ആശയവും പശ്ചാത്തലവും വിശകലനം ചെയ്യുന്നു…',
+      'പ്രധാന വിവരങ്ങൾ പരിശോധിച്ച് മറുപടി ക്രമീകരിക്കുന്നു…',
+      'വ്യക്തവും കൃത്യവുമായ മറുപടി തയ്യാറാക്കുന്നു…',
+    ];
+  }
+
+  if (
+    /\b(code|bug|error|fix|function|react|typescript|python|css|html|api|component|build|compile)\b/i.test(
+      lower,
+    )
+  ) {
+    return [
+      'Analyzing the technical details and architecture…',
+      'Checking edge cases, logic flow, and clean implementation patterns…',
+      'Structuring a clear, working solution…',
+    ];
+  }
+
+  if (
+    /^(what|how|why|when|where|who|which|can|could|should|is|are|do|does|explain|tell)\b/i.test(
+      lower,
+    ) ||
+    raw.endsWith('?')
+  ) {
+    return [
+      'Understanding the core question and relevant context…',
+      'Gathering the most relevant facts and details…',
+      'Structuring a clear, direct explanation…',
+    ];
+  }
+
+  return [
+    'Understanding the context and key points of your message…',
+    'Evaluating key details to address your request…',
+    'Drafting a clear, helpful response…',
+  ];
+}
+
+function GoogleEmblemIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5 shrink-0 opacity-85"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path
+        fill="#4285F4"
+        d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82Z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24Z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.13-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96Z"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Chat Mode 3-Dot Wave + Faded-Out Grey Live AI Thoughts Indicator:
+ * - The thinking text starts at `left: 0` of the 720px column — on the EXACT same
+ *   vertical alignment line as the AI response text ("Hey!...") and the PromptBar's left edge.
+ * - The 3 waving dots (`• • •`) sit OUTSIDE to the left (`right-full mr-2`) with tight spacing.
+ * - When web search is active, displays the Google `G` emblem alongside the search status.
+ */
+function ChatThinkingWave({
+  userPrompt,
+  liveThought,
+  searchSource,
+}: {
+  userPrompt: string;
+  liveThought?: string | null;
+  searchSource?: string | null;
+}) {
+  const willSearch = useMemo(
+    () => Boolean(searchSource || shouldTriggerWebSearch(userPrompt)),
+    [searchSource, userPrompt],
+  );
+  const contextualThoughts = useMemo(() => {
+    if (willSearch) {
+      return [
+        'Searching Google…',
+        'Checking Reddit and live web discussions…',
+        'Synthesizing verified information from live sources…',
+      ];
+    }
+    return deriveContextualChatThoughts(userPrompt);
+  }, [userPrompt, willSearch]);
+  const [stepIndex, setStepIndex] = useState(0);
+
+  useEffect(() => {
+    setStepIndex(0);
+    const timer = window.setInterval(() => {
+      setStepIndex((prev) =>
+        prev < contextualThoughts.length - 1 ? prev + 1 : prev,
+      );
+    }, 1450);
+    return () => window.clearInterval(timer);
+  }, [contextualThoughts]);
+
+  const activeThoughtText =
+    liveThought && liveThought.trim().length > 0
+      ? liveThought.trim()
+      : contextualThoughts[stepIndex] || contextualThoughts[0];
+
+  return (
+    <div
+      className="relative flex items-center py-1 select-none"
+      role="status"
+      aria-live="polite"
+    >
+      {/* 3-Dot Wave Animation placed OUTSIDE to the left of the text start line */}
+      <div className="absolute right-full mr-2 inline-flex items-center gap-[3px] py-1">
+        <span
+          className="thinking-wave-dot"
+          style={{ animationDelay: '0ms' }}
+        />
+        <span
+          className="thinking-wave-dot"
+          style={{ animationDelay: '150ms' }}
+        />
+        <span
+          className="thinking-wave-dot"
+          style={{ animationDelay: '300ms' }}
+        />
+      </div>
+
+      {/* Faded-Out Grey Dynamic AI Thought Text aligned directly with PromptBar left edge */}
+      <div className="flex items-center gap-2">
+        {willSearch ? <GoogleEmblemIcon /> : null}
+        <span
+          key={activeThoughtText}
+          className="thinking-thought-text max-w-[650px] truncate"
+        >
+          {activeThoughtText}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Top Capsule Switcher (`Chat` | `Agent`) — visible ONLY on an empty New Chat.
  */
@@ -362,17 +545,23 @@ export default function App() {
   const [selectedEffort, setSelectedEffort] = useState<string>('High');
   const [busy, setBusy] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
-  const [lastCompletedAiId, setLastCompletedAiId] = useState<string | null>(
-    null,
-  );
+  const [liveChatThought, setLiveChatThought] = useState<string | null>(null);
+  const [liveSearchSource, setLiveSearchSource] = useState<string | null>(null);
   const controller = useRef<AbortController | null>(null);
+  const preThinkEngineRef = useRef<SpeculativePreThinkEngine | null>(null);
+  if (!preThinkEngineRef.current) {
+    preThinkEngineRef.current = new SpeculativePreThinkEngine();
+  }
   const checkedInitialAuthModalRef = useRef(false);
 
   const handleStopGeneration = () => {
     controller.current?.abort();
     controller.current = null;
+    preThinkEngineRef.current?.reset();
     setBusy(false);
     setStreamingId(null);
+    setLiveChatThought(null);
+    setLiveSearchSource(null);
   };
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1039,7 +1228,6 @@ export default function App() {
 
     setBusy(true);
     setStreamingId(aiMsgId);
-    setLastCompletedAiId(null);
     controller.current = new AbortController();
 
     try {
@@ -1082,7 +1270,6 @@ export default function App() {
           );
         },
       });
-      setLastCompletedAiId(aiMsgId);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
@@ -1104,6 +1291,28 @@ export default function App() {
     }
   };
 
+  const handleDraftChange = (nextDraft: string) => {
+    if (busy || effectiveAgentMode) {
+      preThinkEngineRef.current?.reset();
+      return;
+    }
+    const existingMessages = activeSession?.messages ?? [];
+    const historyPayload: StreamChatMessage[] = existingMessages
+      .filter((m) => m.text.trim().length > 0)
+      .slice(-6)
+      .map((m) => ({
+        role: m.role,
+        content: m.text.trim(),
+      }));
+    preThinkEngineRef.current?.updateDraft({
+      draft: nextDraft,
+      model: activeSession?.modelKey || 'void-combo',
+      effort: 'Low',
+      agentMode: effectiveAgentMode,
+      history: historyPayload,
+    });
+  };
+
   const send = async (
     text: string,
     {
@@ -1111,11 +1320,13 @@ export default function App() {
       model,
       effort,
       agentMode: overrideAgentMode,
+      sentViaVoice = false,
     }: {
       attachments: ChatAttachmentItem[];
       model: { key: string; name?: string; shortName?: string };
       effort: string;
       agentMode?: boolean;
+      sentViaVoice?: boolean;
     },
   ) => {
     if (!hasAnyActiveSession) {
@@ -1142,6 +1353,15 @@ export default function App() {
       text.trim() ||
       (uploadedImageUrls.length > 0 ? 'Analyze this image' : '');
 
+    // Consume any invisible background pre-thought generated while the user was typing/speaking
+    const preThought =
+      !isAgent && uploadedImageUrls.length === 0
+        ? preThinkEngineRef.current?.consumeForSend(effectiveText) ?? null
+        : null;
+    if (isAgent || uploadedImageUrls.length > 0) {
+      preThinkEngineRef.current?.reset();
+    }
+
     const userMsg: ChatMessage = {
       id: createClientId(),
       role: 'user',
@@ -1153,16 +1373,6 @@ export default function App() {
 
     const existingMessages = activeSession?.messages ?? [];
 
-    if (model?.key === '4-Argon' || model?.key === '4-argan') {
-      appendOrUpdateSessionMessages(
-        targetChatId,
-        (prev) => [...prev, userMsg],
-        effectiveText,
-        Boolean(isAgent),
-      );
-      return;
-    }
-
     if (effectiveText.length > 0) {
       void addSemanticMemory({
         text: effectiveText,
@@ -1171,6 +1381,43 @@ export default function App() {
     }
 
     const aiMsgId = createClientId();
+    // Voice-Only Auto-Read: ONLY auto-read when the message was sent via microphone dictation!
+    const shouldAutoReadThisTurn = Boolean(sentViaVoice);
+
+    appendOrUpdateSessionMessages(
+      targetChatId,
+      (prev) => [...prev, userMsg],
+      effectiveText,
+      Boolean(isAgent),
+    );
+
+    // Fast-path: If background pre-thinking already completed an exact response for this exact text,
+    // deliver it immediately so the response feels instantaneous!
+    if (
+      preThought?.exactReply &&
+      preThought.exactReply.trim().length > 0 &&
+      !shouldTriggerWebSearch(effectiveText)
+    ) {
+      const readyReply = preThought.exactReply;
+      appendOrUpdateSessionMessages(
+        targetChatId,
+        (prev) => [
+          ...prev,
+          {
+            id: aiMsgId,
+            role: 'assistant',
+            text: readyReply,
+            agentMode: false,
+            shouldAutoRead: shouldAutoReadThisTurn,
+            createdAt: Date.now(),
+          },
+        ],
+        effectiveText,
+        false,
+      );
+      return;
+    }
+
     const historyPayload: StreamChatMessage[] = [...existingMessages, userMsg]
       .filter(
         (m) =>
@@ -1188,15 +1435,12 @@ export default function App() {
         };
       });
 
-    appendOrUpdateSessionMessages(
-      targetChatId,
-      (prev) => [...prev, userMsg],
-      effectiveText,
-      Boolean(isAgent),
-    );
     setBusy(true);
     setStreamingId(null);
-    setLastCompletedAiId(null);
+    setLiveChatThought(null);
+    setLiveSearchSource(
+      !isAgent && shouldTriggerWebSearch(effectiveText) ? 'google' : null,
+    );
     controller.current = new AbortController();
 
     let createdAiBubble = false;
@@ -1234,6 +1478,7 @@ export default function App() {
               agentSteps: latestSteps,
               agentTaskTitle: latestTaskTitle,
               pendingCommand: latestPendingCmd,
+              shouldAutoRead: shouldAutoReadThisTurn,
               createdAt: Date.now(),
             },
           ],
@@ -1290,15 +1535,20 @@ export default function App() {
             nextPendingCmd: pendingCmd,
           });
         },
+        onChatThought: (thoughtText, searchSource) => {
+          setLiveChatThought(thoughtText);
+          if (searchSource) {
+            setLiveSearchSource(searchSource);
+          }
+        },
         onChunk: (_delta, fullText) => {
+          setLiveChatThought(null);
+          setLiveSearchSource(null);
           ensureOrUpdateAiBubble({
             nextText: fullText,
           });
         },
       });
-      if (createdAiBubble && !latestPendingCmd) {
-        setLastCompletedAiId(aiMsgId);
-      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
@@ -1325,6 +1575,8 @@ export default function App() {
     } finally {
       setBusy(false);
       setStreamingId(null);
+      setLiveChatThought(null);
+      setLiveSearchSource(null);
     }
   };
 
@@ -1613,6 +1865,7 @@ export default function App() {
                   onDisconnectFolder={handleDisconnectFolder}
                   busy={busy}
                   onSend={send}
+                  onDraftChange={handleDraftChange}
                   onStop={handleStopGeneration}
                   onAttach={() => pickFiles()}
                   onDictate={() => ''}
@@ -1661,11 +1914,11 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* Active Conversation Thread with Gemini-Style Scroll-to-Top Turn Positioning */
-          <>
+          /* Active Conversation Thread with Exact 720px Left-Edge Alignment Matching PromptBar */
+          <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
             <div
               ref={scrollContainerRef}
-              className="relative z-10 flex-1 overflow-y-auto px-6 pt-6 pb-44"
+              className="flex-1 overflow-y-auto px-6 pt-6 pb-8 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             >
               <div
                 className={`mx-auto flex w-full max-w-[720px] flex-col ${
@@ -1730,7 +1983,7 @@ export default function App() {
                       key={msg.id}
                       className={
                         isInLatestTurn && idx === messages.length - 1
-                          ? 'min-h-[calc(100vh-250px)] pb-8'
+                          ? 'min-h-[calc(100vh-280px)] pb-6'
                           : ''
                       }
                     >
@@ -1740,11 +1993,8 @@ export default function App() {
                         ttsVoice={settings.ttsVoice}
                         ttsModel={settings.ttsModel}
                         ttsSpeed={settings.ttsSpeed}
-                        autoRead={settings.autoReadResponses}
-                        shouldAutoRead={
-                          settings.autoReadResponses &&
-                          lastCompletedAiId === msg.id
-                        }
+                        autoRead={false}
+                        shouldAutoRead={Boolean(msg.shouldAutoRead)}
                         agentSteps={msg.agentSteps}
                         agentTaskTitle={msg.agentTaskTitle}
                         pendingCommand={msg.pendingCommand}
@@ -1764,44 +2014,52 @@ export default function App() {
                 })}
 
                 {busy && !streamingId ? (
-                  <div className="min-h-[calc(100vh-250px)] flex items-start justify-start py-1 text-[#e4e4e7]">
-                    <LatticeLoader
-                      status="working"
-                      label={
-                        effectiveAgentMode ? 'Thinking it through' : 'Thinking'
-                      }
-                      doneLabel="Done in"
-                      errorLabel="Failed after"
-                      pattern="orbit"
-                      grid={3}
-                      shape="round"
-                      doneColor="#ffffff"
-                      errorColor="#ef4444"
-                      cellSize={6}
-                      gap={2}
-                      fontSize={14}
-                      step={90}
-                      idleOpacity={0.15}
-                      glow={false}
-                      glowColor=""
-                      showTimer
-                      elapsed={undefined}
-                      style={undefined}
-                    />
+                  <div className="min-h-[calc(100vh-280px)] flex items-start justify-start py-1 text-[#e4e4e7]">
+                    {effectiveAgentMode ? (
+                      <LatticeLoader
+                        status="working"
+                        label="Thinking it through"
+                        doneLabel="Done in"
+                        errorLabel="Failed after"
+                        pattern="orbit"
+                        grid={3}
+                        shape="round"
+                        doneColor="#ffffff"
+                        errorColor="#ef4444"
+                        cellSize={6}
+                        gap={2}
+                        fontSize={14}
+                        step={90}
+                        idleOpacity={0.15}
+                        glow={false}
+                        glowColor=""
+                        showTimer
+                        elapsed={undefined}
+                        style={undefined}
+                      />
+                    ) : (
+                      <ChatThinkingWave
+                        userPrompt={
+                          lastUserMessageIndex >= 0
+                            ? messages[lastUserMessageIndex]?.text ?? ''
+                            : ''
+                        }
+                        liveThought={liveChatThought}
+                        searchSource={liveSearchSource}
+                      />
+                    )}
                   </div>
                 ) : null}
               </div>
             </div>
 
-            {/* Bottom Floating PromptBar when conversation is active */}
+            {/* Bottom PromptBar aligned in the exact same px-6 + max-w-[720px] column as the messages above */}
             <div
-              className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center bg-gradient-to-t px-6 pt-4 pb-6 transition-colors duration-500 ${
-                effectiveAgentMode
-                  ? 'from-[#000000] via-[#000000]/95 to-transparent'
-                  : 'from-[#080a10] via-[#080a10]/95 to-transparent'
+              className={`shrink-0 px-6 pt-2 pb-6 transition-colors duration-500 ${
+                effectiveAgentMode ? 'bg-[#000000]' : 'bg-transparent'
               }`}
             >
-              <div className="pointer-events-auto w-full max-w-[720px]">
+              <div className="mx-auto w-full max-w-[720px]">
                 <PromptBar
                   placeholder="Ask anything"
                   defaultModel="void-combo"
@@ -1816,6 +2074,7 @@ export default function App() {
                   onDisconnectFolder={handleDisconnectFolder}
                   busy={busy}
                   onSend={send}
+                  onDraftChange={handleDraftChange}
                   onStop={handleStopGeneration}
                   onAttach={() => pickFiles()}
                   onDictate={() => ''}
@@ -1835,7 +2094,7 @@ export default function App() {
                 />
               </div>
             </div>
-          </>
+          </div>
         )}
       </main>
 

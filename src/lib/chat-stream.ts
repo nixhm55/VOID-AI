@@ -34,6 +34,7 @@ export interface StreamChatOptions {
   onChunk: (deltaText: string, fullText: string) => void;
   onAgentSteps?: (steps: AgentPlanStep[], taskTitle?: string) => void;
   onPendingCommand?: (pendingCommand: PendingTerminalCommand) => void;
+  onChatThought?: (thoughtText: string, searchSource?: string) => void;
 }
 
 export async function streamChatCompletion({
@@ -50,6 +51,7 @@ export async function streamChatCompletion({
   onChunk,
   onAgentSteps,
   onPendingCommand,
+  onChatThought,
 }: StreamChatOptions): Promise<string> {
   const normalizedModel = model.trim().toLowerCase();
 
@@ -155,6 +157,18 @@ export async function streamChatCompletion({
       return true;
     }
 
+    if (
+      typeof parsed?.chatThought === 'string' &&
+      parsed.chatThought.trim().length > 0
+    ) {
+      const searchSource =
+        typeof parsed.searchSource === 'string'
+          ? parsed.searchSource
+          : undefined;
+      onChatThought?.(parsed.chatThought.trim(), searchSource);
+      return true;
+    }
+
     return false;
   };
 
@@ -178,6 +192,18 @@ export async function streamChatCompletion({
         const msgObj = firstChoice?.message as
           | Record<string, unknown>
           | undefined;
+
+        const reasoningPiece: unknown =
+          deltaObj?.reasoning_content ??
+          deltaObj?.reasoning ??
+          msgObj?.reasoning_content ??
+          msgObj?.reasoning;
+        if (
+          typeof reasoningPiece === 'string' &&
+          reasoningPiece.trim().length > 0
+        ) {
+          onChatThought?.(reasoningPiece.trim());
+        }
 
         const delta: unknown =
           deltaObj?.content ?? msgObj?.content ?? parsed?.content;

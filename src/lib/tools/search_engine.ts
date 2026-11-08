@@ -77,18 +77,19 @@ export function shouldTriggerWebSearch(userText: string): boolean {
   const lower = raw.toLowerCase();
 
   const realtimePatterns = [
-    /\b(search|google|browse|look\s+up|find\s+out|check\s+online|fetch\s+live|web)\b/,
+    /\b(search|google|reddit|browse|look\s+up|find\s+out|check\s+online|fetch\s+live|web|website|websites|forum|reviews)\b/,
+    /\b(health|symptom|symptoms|medicine|treatment|remedy|disease|doctor|medical|vitamin|diet|nutrition|side\s+effects|pain|fever|infection|cure|therapy)\b/,
     /\b(price|prices|rate|rates|market|stock|stocks|share|shares|index|worth|market\s+cap|valuation|quote|trading|cost)\b/,
-    /\b(oil|crude|wti|brent|gold|silver|bitcoin|btc|ethereum|eth|solana|sol|crypto|sensex|nifty|nasdaq|dow|s&p|usd|inr|eur|gbp| petrol|diesel)\b/,
+    /\b(oil|crude|wti|brent|gold|silver|bitcoin|btc|ethereum|eth|solana|sol|crypto|sensex|nifty|nasdaq|dow|s&p|usd|inr|eur|gbp|petrol|diesel)\b/,
     /\b(today|tonight|right\s+now|currently|current|latest|live|breaking|recent|recently|this\s+week|this\s+month|this\s+year|yesterday|now|2024|2025|2026|2027)\b/,
-    /\b(weather|forecast|temperature|rain|news|headlines|score|scores|match|standings|winner|who\s+won|election|results|box\s+office|release\s+date|update|updates|version)\b/,
+    /\b(weather|forecast|temperature|rain|news|headlines|score|scores|match|standings|winner|who\s+won|election|results|box\s+office|release\s+date|update|updates|version|best\s+way|top\s+10|top\s+5|vs|comparison)\b/,
     /\bwho\s+is\s+(the\s+)?(current\s+)?(ceo|president|prime\s+minister|chief\s+minister|leader|owner|head|champion|richest|founder|governor|mayor)\b/,
     /\bwhat\s+is\s+happening\b/,
     /https?:\/\/[^\s]+/i,
-    // Malayalam real-time cues (ഇന്ന്, ഇന്നത്തെ, വില, വാർത്ത, കാലാവസ്ഥ, ഇപ്പോൾ, പുതിയ, ആരാണ്)
-    /(?:ഇന്ന്|ഇന്നത്തെ|ഇപ്പോൾ|വില|വാർത്ത|വാർത്തകൾ|കാലാവസ്ഥ|മഴ|സ്വർണ്ണവില|സ്വർണ്ണം|പെട്രോൾ|ക്രിക്കറ്റ്|മത്സരം|തിരഞ്ഞെടുപ്പ്|ഫലം|പുതിയ|റിലീസ്|ആരാണ്\s+മുഖ്യമന്ത്രി|ആരാണ്\s+പ്രധാനമന്ത്രി|സെർച്ച്)/,
-    // Hindi real-time cues (आज, ताज़ा, खबर, समाचार, कीमत, भाव, मौसम, कौन है)
-    /(?:आज|ताज़ा|ताजा|खबर|समाचार|कीमत|भाव|रेट|मौसम|स्कोर|मैच|चुनाव|प्रधानमंत्री|मुख्यमंत्री|सर्च)/,
+    // Malayalam real-time & health/search cues
+    /(?:ഇന്ന്|ഇന്നത്തെ|ഇപ്പോൾ|വില|വാർത്ത|വാർത്തകൾ|കാലാവസ്ഥ|മഴ|സ്വർണ്ണവില|സ്വർണ്ണം|പെട്രോൾ|ക്രിക്കറ്റ്|മത്സരം|തിരഞ്ഞെടുപ്പ്|ഫലം|പുതിയ|റിലീസ്|ആരാണ്\s+മുഖ്യമന്ത്രി|ആരാണ്\s+പ്രധാനമന്ത്രി|സെർച്ച്|ആരോഗ്യം|മരുന്ന്|രോഗം|ചികിത്സ)/,
+    // Hindi real-time & health/search cues
+    /(?:आज|ताज़ा|ताजा|खबर|समाचार|कीमत|भाव|रेट|मौसम|स्कोर|मैच|चुनाव|प्रधानमंत्री|मुख्यमंत्री|सर्च|स्वास्थ्य|इलाज|दवा)/,
   ];
 
   return realtimePatterns.some((re) => re.test(lower));
@@ -504,8 +505,140 @@ async function fetchLiveWebBackupResults(
 }
 
 /**
- * Executes a live web search via OmniRoute's `/v1/search` endpoint (Tavily, Serper, SearXNG)
- * with automatic API key rotation and safe fallback.
+ * Stage 2 Fallback: Searches Reddit discussions & community threads (`reddit.com/search.json`)
+ * when Google/OmniRoute results need additional depth or community verification.
+ */
+async function fetchRedditSearchResults(
+  query: string,
+  maxResults = 5,
+): Promise<OmniSearchResultItem[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const cleanQuery = query.replace(/\breddit\b/gi, '').trim() || query;
+    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(cleanQuery)}&sort=relevance&t=all&limit=${maxResults}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) VOID-AI/1.0',
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      data?: {
+        children?: Array<{
+          data?: {
+            title?: string;
+            selftext?: string;
+            permalink?: string;
+            subreddit_name_prefixed?: string;
+          };
+        }>;
+      };
+    };
+    const children = data?.data?.children ?? [];
+    const items: OmniSearchResultItem[] = [];
+    for (const child of children) {
+      const post = child?.data;
+      if (!post?.title) continue;
+      const sub = post.subreddit_name_prefixed || 'r/reddit';
+      const bodySnippet = String(post.selftext ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 260);
+      items.push({
+        title: `[${sub}] ${post.title}`,
+        url: post.permalink
+          ? `https://www.reddit.com${post.permalink}`
+          : 'https://www.reddit.com',
+        snippet: bodySnippet || `${post.title} (${sub})`,
+      });
+      if (items.length >= maxResults) break;
+    }
+    return items;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Stage 3 Fallback: Searches Wikipedia & DuckDuckGo Open Web Instant Answer API
+ * so the search engine keeps cascading across websites until concrete facts are found.
+ */
+async function fetchOpenWebKnowledgeResults(
+  query: string,
+  maxResults = 4,
+): Promise<OmniSearchResultItem[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&origin=*&srlimit=${maxResults}`;
+    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+
+    const [wikiRes, ddgRes] = await Promise.allSettled([
+      fetch(wikiUrl, { signal: controller.signal }),
+      fetch(ddgUrl, { signal: controller.signal }),
+    ]);
+
+    const results: OmniSearchResultItem[] = [];
+
+    if (ddgRes.status === 'fulfilled' && ddgRes.value.ok) {
+      const ddgData = (await ddgRes.value.json()) as Record<string, unknown>;
+      const abstractText = String(ddgData.AbstractText ?? '').trim();
+      const abstractUrl = String(ddgData.AbstractURL ?? '').trim();
+      const heading = String(ddgData.Heading ?? query).trim();
+      if (abstractText) {
+        results.push({
+          title: heading,
+          url: abstractUrl || 'https://duckduckgo.com',
+          snippet: abstractText,
+        });
+      }
+    }
+
+    if (wikiRes.status === 'fulfilled' && wikiRes.value.ok) {
+      const wikiData = (await wikiRes.value.json()) as {
+        query?: {
+          search?: Array<{
+            title?: string;
+            snippet?: string;
+          }>;
+        };
+      };
+      for (const item of wikiData?.query?.search ?? []) {
+        if (!item?.title) continue;
+        const cleanSnippet = String(item.snippet ?? '')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&quot;/g, '"')
+          .replace(/&amp;/g, '&')
+          .trim();
+        results.push({
+          title: `${item.title} — Reference`,
+          url: `https://en.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/\s+/g, '_'))}`,
+          snippet: cleanSnippet || item.title,
+        });
+      }
+    }
+
+    return results.slice(0, maxResults);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Executes a multi-stage cascading live web search:
+ * 1. First searches Google / OmniRoute (Serper, Tavily, SearXNG + Google News)
+ * 2. If not enough results (or if Reddit/community context is requested), searches Reddit
+ * 3. If still not enough results, cascades to Open Web / Wikipedia / DuckDuckGo
+ * until verified information is found.
  */
 export async function executeOmniRouteSearch(options: {
   query: string;
@@ -513,12 +646,14 @@ export async function executeOmniRouteSearch(options: {
   maxResults?: number;
   baseUrl: string;
   apiKeys: string[];
+  onSearchStage?: (source: 'google' | 'reddit' | 'web', statusText: string) => void;
 }): Promise<OmniSearchResponse> {
-  const { query, maxResults = 6, baseUrl, apiKeys } = options;
+  const { query, maxResults = 6, baseUrl, apiKeys, onSearchStage } = options;
 
   const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
   const searchEndpoint = `${cleanBaseUrl}/search`;
 
+  onSearchStage?.('google', 'Searching Google…');
   const marketQuotesPromise = fetchLiveMarketQuotes(query).catch(() => []);
 
   let omniResponse: OmniSearchResponse | null = null;
@@ -543,33 +678,52 @@ export async function executeOmniRouteSearch(options: {
   }
 
   const marketQuotes = await marketQuotesPromise;
+  const googleNewsBackup =
+    !omniResponse || omniResponse.results.length === 0
+      ? await fetchLiveWebBackupResults(query, maxResults).catch(() => [])
+      : [];
 
-  if (omniResponse && (omniResponse.results.length > 0 || omniResponse.answer)) {
-    return {
-      ...omniResponse,
-      results: [...marketQuotes, ...omniResponse.results].slice(
-        0,
-        maxResults + marketQuotes.length,
-      ),
-    };
+  let collectedResults: OmniSearchResultItem[] = [
+    ...marketQuotes,
+    ...(omniResponse?.results ?? []),
+    ...googleNewsBackup,
+  ];
+  let activeProvider = omniResponse?.provider || 'Google Search';
+
+  const explicitlyWantsReddit = /\b(reddit|forum|community|people\s+say|experience)\b/i.test(
+    query,
+  );
+
+  if (collectedResults.length < 2 || explicitlyWantsReddit) {
+    onSearchStage?.('reddit', 'Searching Reddit discussions…');
+    const redditItems = await fetchRedditSearchResults(query, 4);
+    if (redditItems.length > 0) {
+      collectedResults = [...collectedResults, ...redditItems];
+      activeProvider =
+        collectedResults.length === redditItems.length
+          ? 'Reddit'
+          : `${activeProvider} + Reddit`;
+    }
   }
 
-  const webBackup = await fetchLiveWebBackupResults(query, maxResults).catch(
-    () => [],
-  );
-  const combinedResults = [...marketQuotes, ...webBackup];
+  if (collectedResults.length < 2) {
+    onSearchStage?.('web', 'Searching across web sources…');
+    const openWebItems = await fetchOpenWebKnowledgeResults(query, 5);
+    if (openWebItems.length > 0) {
+      collectedResults = [...collectedResults, ...openWebItems];
+      activeProvider = `${activeProvider} + Web`;
+    }
+  }
 
   return {
     query,
-    provider:
-      marketQuotes.length > 0
-        ? 'omniroute-live-market+web'
-        : 'omniroute-web-search',
+    provider: activeProvider,
     answer:
-      marketQuotes.length > 0
+      omniResponse?.answer ||
+      (marketQuotes.length > 0
         ? marketQuotes.map((q) => `${q.title} (${q.snippet})`).join(' | ')
-        : null,
-    results: combinedResults,
+        : null),
+    results: collectedResults.slice(0, maxResults + 3),
   };
 }
 

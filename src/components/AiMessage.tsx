@@ -573,7 +573,6 @@ export default function AiMessage({
   ttsVoice = 'coral',
   ttsModel = 'gpt-4o-mini-tts',
   ttsSpeed = 1.0,
-  autoRead = false,
   shouldAutoRead = false,
   agentSteps,
   agentTaskTitle,
@@ -585,8 +584,11 @@ export default function AiMessage({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playbackIdRef = useRef(0);
   const objectUrlsRef = useRef<string[]>([]);
-  const wasStreamingRef = useRef(isStreaming);
   const hasAutoReadRef = useRef(false);
+  const prefetchedChunkRef = useRef<{
+    text: string;
+    promise: Promise<{ url: string; provider: string } | null>;
+  } | null>(null);
 
   const stopSpeech = useCallback(() => {
     playbackIdRef.current += 1;
@@ -617,6 +619,63 @@ export default function AiMessage({
     };
   }, [stopSpeech]);
 
+  const fetchAudioSegment = useCallback(
+    async (
+      chunk: { text: string; tl: string },
+      timeoutMs = 1300,
+    ): Promise<{ url: string; provider: string } | null> => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await authenticatedFetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: chunk.text,
+            tl: chunk.tl,
+            voice: ttsVoice,
+            model: ttsModel,
+            speed: ttsSpeed,
+          }),
+          signal: controller.signal,
+        });
+        window.clearTimeout(timer);
+        if (!res.ok) return null;
+        const provider = res.headers.get('X-TTS-Provider') || 'voidai-tts';
+        const blob = await res.blob();
+        if (blob.size === 0) return null;
+        const url = URL.createObjectURL(blob);
+        objectUrlsRef.current.push(url);
+        return { url, provider };
+      } catch {
+        window.clearTimeout(timer);
+        return null;
+      }
+    },
+    [ttsModel, ttsSpeed, ttsVoice],
+  );
+
+  // Pre-fetch the first speech chunk WHILE streaming when voice auto-read is active
+  // so playback starts with zero delay the moment streaming finishes!
+  useEffect(() => {
+    if (!shouldAutoRead || hasAutoReadRef.current || !text.trim()) return;
+    const chunks = splitTextIntoSpeechChunks(text);
+    if (chunks.length === 0) return;
+    const firstChunk = chunks[0];
+    if (isStreaming && chunks.length < 2 && firstChunk.text.length < 48) {
+      return;
+    }
+    if (
+      !prefetchedChunkRef.current ||
+      prefetchedChunkRef.current.text !== firstChunk.text
+    ) {
+      prefetchedChunkRef.current = {
+        text: firstChunk.text,
+        promise: fetchAudioSegment(firstChunk, 950),
+      };
+    }
+  }, [shouldAutoRead, isStreaming, text, fetchAudioSegment]);
+
   const startSpeakingText = useCallback(
     async (rawTextToSpeak: string) => {
       if (activeStopSpeechCallback) {
@@ -630,34 +689,6 @@ export default function AiMessage({
       const currentPlaybackId = ++playbackIdRef.current;
       setSpeaking(true);
 
-      const fetchAudioSegment = async (chunk: {
-        text: string;
-        tl: string;
-      }): Promise<{ url: string; provider: string } | null> => {
-        try {
-          const res = await authenticatedFetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: chunk.text,
-              tl: chunk.tl,
-              voice: ttsVoice,
-              model: ttsModel,
-              speed: ttsSpeed,
-            }),
-          });
-          if (!res.ok) return null;
-          const provider = res.headers.get('X-TTS-Provider') || 'voidai-tts';
-          const blob = await res.blob();
-          if (blob.size === 0) return null;
-          const url = URL.createObjectURL(blob);
-          objectUrlsRef.current.push(url);
-          return { url, provider };
-        } catch {
-          return null;
-        }
-      };
-
       const speakWithBrowserFallback = (chunk: {
         text: string;
         bcp47: string;
@@ -667,9 +698,12 @@ export default function AiMessage({
             resolve();
             return;
           }
+          try {
+            window.speechSynthesis.cancel();
+          } catch {}
           const utterance = new SpeechSynthesisUtterance(chunk.text);
           utterance.lang = chunk.bcp47;
-          utterance.rate = 1.08 * ttsSpeed;
+          utterance.rate = 1.12 * ttsSpeed;
           const voices = window.speechSynthesis.getVoices();
           const langPrefix = chunk.bcp47.split('-')[0].toLowerCase();
           const matchingVoice =
@@ -686,7 +720,11 @@ export default function AiMessage({
           window.speechSynthesis.speak(utterance);
         });
 
-      let nextSegmentPromise = fetchAudioSegment(chunks[0]);
+      let nextSegmentPromise =
+        prefetchedChunkRef.current &&
+        prefetchedChunkRef.current.text === chunks[0].text
+          ? prefetchedChunkRef.current.promise
+          : fetchAudioSegment(chunks[0], 750);
 
       for (let i = 0; i < chunks.length; i += 1) {
         if (playbackIdRef.current !== currentPlaybackId) return;
@@ -694,7 +732,7 @@ export default function AiMessage({
         const currentSegmentPromise = nextSegmentPromise;
         nextSegmentPromise =
           i + 1 < chunks.length
-            ? fetchAudioSegment(chunks[i + 1])
+            ? fetchAudioSegment(chunks[i + 1], 1300)
             : Promise.resolve(null);
 
         const segment = currentSegmentPromise ? await currentSegmentPromise : null;
@@ -708,10 +746,10 @@ export default function AiMessage({
               segment.provider === 'voidai-tts' ||
               segment.provider === 'elevenlabs-omniroute' ||
               segment.provider === 'deepgram-flux'
-                ? 1.0
+                ? 1.05
                 : chunks[i].tl.startsWith('en')
-                  ? 1.15
-                  : 1.1;
+                  ? 1.16
+                  : 1.12;
             audio.playbackRate = baseRate * ttsSpeed;
             audioRef.current = audio;
             audio.onended = () => resolve(true);
@@ -733,7 +771,7 @@ export default function AiMessage({
         }
       }
     },
-    [stopSpeech, ttsModel, ttsSpeed, ttsVoice],
+    [fetchAudioSegment, stopSpeech, ttsSpeed],
   );
 
   const toggleSpeak = async () => {
@@ -747,22 +785,19 @@ export default function AiMessage({
     await startSpeakingText(text);
   };
 
+  // Voice-Only Auto-Read: ONLY auto-read when `shouldAutoRead` is true (sent via microphone),
+  // NEVER when the user typed a message on the keyboard!
   useEffect(() => {
-    if (isStreaming) {
-      wasStreamingRef.current = true;
-      return;
-    }
     if (
       !isStreaming &&
-      (shouldAutoRead || (wasStreamingRef.current && autoRead)) &&
+      shouldAutoRead &&
       !hasAutoReadRef.current &&
       text.trim().length > 0
     ) {
-      wasStreamingRef.current = false;
       hasAutoReadRef.current = true;
       void startSpeakingText(text);
     }
-  }, [isStreaming, autoRead, shouldAutoRead, text, startSpeakingText]);
+  }, [isStreaming, shouldAutoRead, text, startSpeakingText]);
 
   // Split by fenced code blocks ```lang ... ```
   const blocks: ReactNode[] = [];
